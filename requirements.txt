@@ -1,0 +1,17 @@
+# torch==2.0.0
+# librosa==0.10.0
+# sounddevice==0.4.6
+# onnxruntime==1.15.0
+# numpy==1.24.0
+
+torch
+librosa
+numpy
+matplotlib
+scikit-learn
+seaborn
+soundfile
+tqdm
+sounddevice
+onnx
+torchvision
