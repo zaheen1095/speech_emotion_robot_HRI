@@ -6,19 +6,13 @@ from tqdm import tqdm
 from config import FEATURE_SETTINGS, RESAMPLED_DIR, FEATURES_DIR
 
 def extract_mfcc(audio_path: str) -> np.ndarray:
-    """
-    Extract MFCC features (+ delta, delta-delta) from an audio file.
-    Applies Mel spectrogram with fmin/fmax and converts to MFCCs.
-    """
     try:
-        # Load and trim/pad audio to fixed length
         y, sr = librosa.load(
             audio_path,
             sr=FEATURE_SETTINGS['sample_rate'],
-            duration=3.0  # Ensures consistent feature dimensions
+            duration=3.0
         )
 
-        # Step 1: Compute Mel spectrogram with custom fmin/fmax
         mel_spec = librosa.feature.melspectrogram(
             y=y,
             sr=sr,
@@ -28,32 +22,30 @@ def extract_mfcc(audio_path: str) -> np.ndarray:
             fmin=FEATURE_SETTINGS['fmin'],
             fmax=FEATURE_SETTINGS['fmax']
         )
-
-        # Step 2: Convert to log-scaled dB
         mel_db = librosa.power_to_db(mel_spec)
 
-        # Step 3: Convert Mel spectrogram to MFCC
-        mfcc = librosa.feature.mfcc(
-            S=mel_db,
-            n_mfcc=FEATURE_SETTINGS['n_mfcc']
-        )
+        mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
 
-        # Step 4: Stack delta and delta-delta if enabled
         features = [mfcc]
         if FEATURE_SETTINGS['use_delta']:
             features.append(librosa.feature.delta(mfcc))
         if FEATURE_SETTINGS['use_delta_delta']:
             features.append(librosa.feature.delta(mfcc, order=2))
 
-        return np.vstack(features).T  # Shape: (time_steps, features)
+        return np.vstack(features).T
 
     except Exception as e:
         raise ValueError(f"Error processing {audio_path}: {str(e)}")
 
+def normalize_length(features, target_len=150):
+    if features.shape[0] < target_len:
+        pad_amt = target_len - features.shape[0]
+        features = np.pad(features, ((0, pad_amt), (0, 0)))
+    else:
+        features = features[:target_len, :]
+    return features
+
 def process_audio_files(split: str):
-    """
-    Process all audio files in a split (train/test) and save features as .npy.
-    """
     split_dir = RESAMPLED_DIR / split
     output_dir = FEATURES_DIR / split
     os.makedirs(output_dir, exist_ok=True)
@@ -69,6 +61,7 @@ def process_audio_files(split: str):
 
                 try:
                     features = extract_mfcc(str(input_path))
+                    features = normalize_length(features)
                     np.save(output_path, features)
                 except ValueError as e:
                     print(f" Skipping {filename}: {str(e)}")

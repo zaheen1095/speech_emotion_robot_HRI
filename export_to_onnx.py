@@ -12,7 +12,7 @@ model.eval()
 dummy_input = torch.randn(1, 200, 39)  # Adjust time dimension if needed
 
 # Export
-onnx_path = MODEL_DIR / "model.onnx"
+onnx_path = MODEL_DIR / "best_model.onnx"
 torch.onnx.export(
     model,
     dummy_input,

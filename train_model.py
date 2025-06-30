@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from pathlib import Path
 from models.cnn_bilstm import CNNBiLSTM
@@ -42,16 +43,20 @@ def train():
     train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(FeatureDataset(X_val, y_val), batch_size=BATCH_SIZE)
 
-    print("\n🧠 Initializing model...")
+    print("\n Initializing model...")
     model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3)
+    writer = SummaryWriter()
 
     EPOCHS = 30
     best_val_acc = 0.0
+    patience = 5
+    patience_counter = 0
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    print("\n🏋️ Training...")
+    print("\n Training...")
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
@@ -74,12 +79,25 @@ def train():
                 total += labels.size(0)
 
         val_acc = correct / total
+        scheduler.step(val_acc)
+
+        writer.add_scalar('Loss/train', total_loss, epoch)
+        writer.add_scalar('Accuracy/val', val_acc, epoch)
+
         print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {total_loss:.4f} | Val Acc: {val_acc:.2f}")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), MODEL_DIR / "best_model.pt")
-            print("✅ Best model saved.")
+            print("Best model saved.")
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(" Early stopping!")
+                break
+
+    writer.close()
 
 if __name__ == "__main__":
     train()
