@@ -119,7 +119,7 @@ class EmotionApp(QWidget):
         scroll.setWidget(container)
 
         # Record button
-        self.button = QPushButton(" Record & Predict ...")
+        self.button = QPushButton(" Record & Predict")
         self.button.clicked.connect(self.record_and_predict)
 
         # Main layout
@@ -266,16 +266,6 @@ class EmotionApp(QWidget):
             # 4) display
             self.append_message(bot_reply, is_user=False)
 
-            # 5) Speak off-thread
-            threading.Thread(
-                target=lambda: (self.engine.say(bot_reply), self.engine.runAndWait()),
-                daemon=True
-            ).start()
-
-        # except Exception as e:
-        #     err = f"Error: {e}"
-        #     self.append_message(err, is_user=False)
-        #     print(err)
 
             # 5) speak in background
             threading.Thread(
