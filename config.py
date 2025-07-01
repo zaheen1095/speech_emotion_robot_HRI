@@ -10,15 +10,15 @@ MODEL_DIR = BASE_DIR / 'models'
 
 # === Feature Extraction ===
 FEATURE_SETTINGS = {
-    'sample_rate': 16000,
-    'n_mfcc': 13,
-    'use_delta': True,
-    'use_delta_delta': True,
-    'n_mels': 40,
-    'n_fft': 512,
-    'hop_length': 160,
-    'fmin': 50,       # Min frequency for Mel filters
-    'fmax': 8000,     # Max frequency (human voice range)
+    "sample_rate": 16000,
+    "n_fft": 512,         # etc…
+    "hop_length": 256,
+    "n_mels": 40,
+    "fmin": 20,
+    "fmax": 8000,
+    "n_mfcc": 13,
+    "use_delta": True,
+    "use_delta_delta": True
 }
 
 # === Training Defaults ===
