@@ -2,11 +2,10 @@ import sys
 import numpy as np
 import librosa
 import sounddevice as sd
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel, QVBoxLayout
-from PyQt5.QtCore import Qt
 import pyttsx3
 import threading
-
+from PyQt5.QtCore import Qt,QSize
+from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
@@ -61,7 +60,7 @@ def extract_mfcc_from_array(y, sr, max_len=150):
     else:
         stacked = stacked[:max_len, :]
     
-    print("✅ MFCC shape (after stack):", stacked.shape)
+    print("MFCC shape (after stack):", stacked.shape)
 
     return stacked.astype(np.float32)
 
@@ -70,6 +69,7 @@ class ChatBubble(QLabel):
         super().__init__(text)
         self.setWordWrap(True)
         self.setMaximumWidth(300)
+    
         if is_user:
             self.setStyleSheet(
                 "background:#e0e0e0; border-radius:10px; padding:8px;"
@@ -106,32 +106,38 @@ class EmotionApp(QWidget):
         # -------------------------------------
 
         super().__init__()
-        self.setWindowTitle("Emotion Bot Chat")
+        self.setWindowTitle("Speech Emotion Detection Application")
         self.setGeometry(100, 100, 400, 500)
 
-        # Chat area (vertical) inside a scrollable container
+        # — Add a microphone indicator —
+        self.mic_icon = QLabel()
+        # load two small images (mic_off.png and mic_on.png) into your project folder
+        self.mic_off = QPixmap("mic-off.png").scaled(24,24, Qt.KeepAspectRatio)
+        self.mic_on  = QPixmap("mic-on.png").scaled(24,24, Qt.KeepAspectRatio)
+        self.mic_icon.setPixmap(self.mic_off)
+
+        # Chat area
         self.chat_layout = QVBoxLayout()
         self.chat_layout.setAlignment(Qt.AlignTop)
-        container = QWidget()
+        container = QWidget(); 
         container.setLayout(self.chat_layout)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
+        scroll    = QScrollArea(); 
+        scroll.setWidgetResizable(True); scroll.setWidget(container)
 
         # Record button
-        self.button = QPushButton(" Record & Predict")
+        self.button = QPushButton(" Record & Detect")
+        self.button.setIcon(QIcon(self.mic_off))
+        self.button.setIconSize(QSize(24,24))
         self.button.clicked.connect(self.record_and_predict)
 
-        # Main layout
+        # Main layout: MIC ICON goes *before* the scroll
         main_layout = QVBoxLayout(self)
+        main_layout.addWidget(self.mic_icon, alignment=Qt.AlignCenter)
         main_layout.addWidget(scroll)
         main_layout.addWidget(self.button)
 
-        # TTS engine
-        self.engine = pyttsx3.init()
+        self.scroll_area   = scroll
         self.is_processing = False
-        # Keep reference to scroll for auto-scroll
-        self.scroll_area = scroll
 
     def append_message(self, text, is_user=False):
         bubble = ChatBubble(text, is_user)
@@ -150,13 +156,16 @@ class EmotionApp(QWidget):
         sb.setValue(sb.maximum())
 
     def _finish(self):
+        """Turn mic icon off and re-enable the button."""
+        self.mic_icon.setPixmap(self.mic_off)
         self.is_processing = False
         self.button.setEnabled(True)
 
     def _speak_and_finish(self, text):
-        """ TTS on background thread, re-enable when done """
-        self.engine.say(text)
-        self.engine.runAndWait()
+        """Speak text (fresh engine) then call _finish()."""
+        engine = pyttsx3.init()
+        engine.say(text)
+        engine.runAndWait()
         self._finish()
 
     # def record_and_predict(self):
@@ -213,21 +222,19 @@ class EmotionApp(QWidget):
             return
         self.is_processing = True
         self.button.setEnabled(False)
-        # Indicate recording
-        self.append_message("⏺️ Recording...", is_user=True)
+
+        # 1) Turn mic icon ON
+        self.mic_icon.setPixmap(self.mic_on)
         QApplication.processEvents()
 
         try:
-            # 1) Record
-            duration = 3.0
-            sr       = FEATURE_SETTINGS['sample_rate']
-            audio    = sd.rec(int(duration*sr), samplerate=sr, channels=1)
+            # 2) Record 3s
+            sr = FEATURE_SETTINGS['sample_rate']
+            audio = sd.rec(int(3*sr), samplerate=sr, channels=1)
             sd.wait()
-            audio    = audio.flatten()
+            audio = audio.flatten()
 
-            # if np.max(np.abs(audio))>0:
-            #     audio = audio/np.max(np.abs(audio))
-            #  check silence
+            # 3) Silence check
             if np.max(np.abs(audio)) < 0.02:
                 bot_reply = "I couldn't hear anything. Could you try speaking a bit louder?"
                 self.append_message(bot_reply, is_user=False)
@@ -238,36 +245,32 @@ class EmotionApp(QWidget):
                 ).start()
                 return
 
-            
-            # 2) Extract features
-            feats = extract_mfcc_from_array(audio, sr)
-            # inp   = feats[np.newaxis,:,:]
-            inp   = feats[np.newaxis,:,:].astype(np.float32)
+            # 4) Show a user bubble placeholder
+            self.append_message("(audio captured)", is_user=True)
 
-            # 3) Infer
+            # 5) Feature extraction & inference
+            feats = extract_mfcc_from_array(audio, sr)
+            inp = feats[np.newaxis,:,:].astype(np.float32)
             if USE_ONNX:
                 probs = session.run(None, {input_name: inp})[0][0]
             else:
                 import torch
-                tensor = torch.tensor(inp).unsqueeze(0)
-                with torch.no_grad():
-                    logits = model(tensor)
-                probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+                logits = model(torch.tensor(inp).unsqueeze(0))
+                probs  = torch.softmax(logits, dim=1).cpu().numpy()[0]
 
-            conf     = float(np.max(probs))
+            conf= float(np.max(probs))
             pred_idx = int(np.argmax(probs))
-            emotion  = "Uncertain" if conf<0.6 else CLASSES[pred_idx]
-            # response = responses.get(emotion, "Could you say that again?")
+            # DEBUG: print out to console
+            print(f"[DEBUG] raw probs={probs}, conf={conf:.2f}, idx={pred_idx}")
 
-            # # 4) Show bot reply
-            # self.append_message(response, is_user=False)
-            bot_reply = responses[emotion]
+            # 6) Map to emotion
+            emotion = "Uncertain" if conf < 0.6 else CLASSES[pred_idx]
+            bot_reply= responses[emotion]
 
-            # 4) display
+            # 7) Show bot bubble
             self.append_message(bot_reply, is_user=False)
 
-
-            # 5) speak in background
+            # 8) Speak
             threading.Thread(
                 target=self._speak_and_finish,
                 args=(bot_reply,),
@@ -275,11 +278,16 @@ class EmotionApp(QWidget):
             ).start()
 
         except Exception as e:
+            print("Error in record_and_predict:", e)
+            self._finish()
+
+        except Exception as e:
             self.label.setText("Error - Click 'Record' to retry")
             self.result_label.setText(f"Error: {str(e)}")
             print(f"Error: {e}")
+            self._finish()
             
-        print(f"🎯 You said it with a {emotion.upper()} tone.")
+        print(f"You said it with a {emotion.upper()} tone.")
 
 # --- Run
 if __name__ == "__main__":
