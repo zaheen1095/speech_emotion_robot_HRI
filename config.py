@@ -18,9 +18,16 @@ FEATURE_SETTINGS = {
     "fmax": 8000,
     "n_mfcc": 13,
     "use_delta": True,
-    "use_delta_delta": True
+    "use_delta_delta": True,
+    "max_len": 150,          # pad/truncate frames
+    "max_duration": 3.0      # seconds to load
 }
 
 # === Training Defaults ===
 CLASSES = ['happy', 'sad']
 BATCH_SIZE = 32
+RESPONSES = {
+    "happy": "You sound happy! I'm glad to hear that.",
+    "sad": "I'm here for you. It's okay to feel sad. Do you want to talk about it?",
+    "Uncertain": "I am not sure how you are feeling. Would you like to try again."
+}
