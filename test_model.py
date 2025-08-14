@@ -29,6 +29,8 @@ def load_test_data():
     y = []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'test' / emotion
+        if not emotion_dir.exists():
+            continue
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
                 X.append(str(emotion_dir / file))
@@ -39,13 +41,12 @@ def load_test_data():
 def test():
     print("\n Loading test data...")
     X_test, y_test = load_test_data()
-    test_loader = DataLoader(FeatureDataset(X_test, y_test), batch_size=BATCH_SIZE)
+    test_loader = DataLoader(FeatureDataset(X_test, y_test), batch_size=BATCH_SIZE, shuffle=False)
 
     print("\n Loading trained model...")
     model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
-    model.load_state_dict(torch.load(MODEL_DIR / "best_model.pt", map_location=torch.device('cpu')))
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(torch.load(MODEL_DIR / "best_model.pt", map_location=device))
     model.to(device)
     model.eval()
 
@@ -57,22 +58,29 @@ def test():
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             _, preds = torch.max(outputs, 1)
-            y_true.extend(labels.cpu().numpy())
-            y_pred.extend(preds.cpu().numpy())
+            y_true.extend(labels.cpu().numpy().tolist())
+            y_pred.extend(preds.cpu().numpy().tolist())
 
     print("\n Classification Report:")
-    print(classification_report(y_true, y_pred, target_names=CLASSES, digits=4))
+    report = classification_report(y_true, y_pred, target_names=CLASSES, digits=4)
+    print(report)
 
-    cm = confusion_matrix(y_true, y_pred)
+    # Save report
+    os.makedirs("results", exist_ok=True)
+    with open("results/classification_report.txt", "w") as f:
+        f.write(report)
+
+    # Confusion matrix (fixed label order)
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(CLASSES))))
     plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt='d', xticklabels=CLASSES, yticklabels=CLASSES, cmap="Blues")
     plt.title("Confusion Matrix")
     plt.xlabel("Predicted")
     plt.ylabel("True")
-
-    os.makedirs("results", exist_ok=True)
+    plt.tight_layout()
     plt.savefig("results/confusion_matrix.png")
     plt.show()
+
 
 if __name__ == "__main__":
     test()

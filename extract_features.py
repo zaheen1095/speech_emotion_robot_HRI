@@ -5,7 +5,7 @@ from pathlib import Path
 from tqdm import tqdm
 from config import FEATURE_SETTINGS, RESAMPLED_DIR, FEATURES_DIR
 import noisereduce as nr
-from utils import pad_sequence   # <-- added
+from utils import pad_sequence   # keep as-is
 
 def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = None) -> np.ndarray:
     try:
@@ -22,16 +22,16 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
 
         # --- Trim leading/trailing silence (keeps emotional core tighter) ---
         y_trim, _ = librosa.effects.trim(y, top_db=30)
-        # Fallback if trimming leaves too little audio
         if y_trim.size >= int(0.25 * sr):   # ≥ 250 ms remains
             y = y_trim
-        # else keep original y
 
         # --- Optional safer denoise (leave commented unless necessary) ---
         # y = reduce_noise_safely(y, sr)
 
-        # --- Pick highest-energy window instead of "first N seconds" ---
-        max_duration = FEATURE_SETTINGS.get('max_duration', 4.0)
+        # --- Pick highest-energy window (target = FEATURE_SETTINGS['max_duration']) ---
+        # max_duration = FEATURE_SETTINGS.get('max_duration', 4.0)
+        max_duration = FEATURE_SETTINGS['max_duration']  # now uses 5.0 from config
+
         target = int(max_duration * sr)
         if len(y) > target:
             hop = int(0.10 * sr)  # slide 100ms
@@ -77,7 +77,7 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
     except Exception as e:
         raise ValueError(f"Error processing {audio_path}: {str(e)}")
 
-def normalize_length(features : np.ndarray, target_len=150) -> np.ndarray:
+def normalize_length(features: np.ndarray, target_len=150) -> np.ndarray:
     """
     (Deprecated if embedded in extract_mfcc; kept for compatibility)
     """
@@ -95,7 +95,7 @@ def process_audio_files(split: str):
 
     for emotion in tqdm(os.listdir(split_dir), desc=f"Processing {split}"):
         emotion_dir = split_dir / emotion
-        if not emotion_dir.is_dir():     # <-- added guard
+        if not emotion_dir.is_dir():     # guard
             continue
         os.makedirs(output_dir / emotion, exist_ok=True)
 
@@ -106,7 +106,6 @@ def process_audio_files(split: str):
 
                 try:
                     features = extract_mfcc(audio_path=str(input_path))
-                    # Optional sanity warning (keeps your names & logic)
                     if features.shape[0] != FEATURE_SETTINGS['max_len']:
                         print(f" Warn: {filename} -> {features.shape[0]} frames (expected {FEATURE_SETTINGS['max_len']}).")
                     np.save(output_path, features)

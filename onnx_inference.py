@@ -1,4 +1,3 @@
-import librosa
 import numpy as np
 import sounddevice as sd
 import onnxruntime as ort
@@ -7,13 +6,13 @@ from extract_features import extract_mfcc
 
 # --- Load ONNX Model ---
 onnx_model_path = "models/best_model.onnx"
-session = ort.InferenceSession(onnx_model_path)
+session = ort.InferenceSession(onnx_model_path, providers=['CPUExecutionProvider'])
 input_name = session.get_inputs()[0].name
 
-# --- Constants (match config) ---
-DURATION = FEATURE_SETTINGS['max_duration']
-SAMPLE_RATE = FEATURE_SETTINGS['sample_rate']
-MAX_TIMESTEPS = FEATURE_SETTINGS['max_len']
+# --- Constants from config ---
+DURATION = FEATURE_SETTINGS['max_duration']     # 5.0
+SAMPLE_RATE = FEATURE_SETTINGS['sample_rate']   # 16000
+MAX_TIMESTEPS = FEATURE_SETTINGS['max_len']     # 313
 
 # --- Record Audio ---
 def record_audio(duration=DURATION, sr=SAMPLE_RATE):
@@ -22,42 +21,40 @@ def record_audio(duration=DURATION, sr=SAMPLE_RATE):
     sd.wait()
     return audio.flatten()
 
-# --- Normalize Feature Length (kept for compatibility; extractor already pads) ---
-def normalize_length(features, target_len=MAX_TIMESTEPS):
-    if features.shape[0] < target_len:
-        pad_amt = target_len - features.shape[0]
-        features = np.pad(features, ((0, pad_amt), (0, 0)))
-    else:
-        features = features[:target_len, :]
-    return features.astype(np.float32)
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    x = x - np.max(x)
+def _softmax(x):
+    x = x - np.max(x, axis=-1, keepdims=True)
     e = np.exp(x)
-    return e / np.sum(e)
+    return e / np.sum(e, axis=-1, keepdims=True)
 
-# ─── Predict ────────────────────────────────────────────────────────────
+# --- Predict ---
 def predict_emotion(audio: np.ndarray):
-    # 1) MFCC via central extractor (pads/normalizes per config)
-    feats = extract_mfcc(audio_path=None, array=audio, sr=SAMPLE_RATE)  # (MAX_TIMESTEPS, 39)
-    input_data = feats[np.newaxis, :, :]  # (1, T, F)
+    # Centralized feature extraction (already pads/trims to MAX_TIMESTEPS)
+    feats = extract_mfcc(array=audio, sr=SAMPLE_RATE)      # shape (MAX_TIMESTEPS, 39)
+    input_data = np.ascontiguousarray(feats[np.newaxis, :, :],   # (1, T, 39)
+                                      dtype=np.float32)                  # shape (1, T, 39)
 
-    # 2) ONNX forward -> logits -> probabilities
+    # ONNX forward → logits
     outputs = session.run(None, {input_name: input_data})
-    logits = outputs[0].squeeze()          # shape (num_classes,)
-    p = _softmax(logits).astype(float)     # numpy float probs
+    logits = outputs[0]                                    # shape (1, num_classes)
+
+    # Softmax → probabilities (numerically stable), keep your 'p' name
+    # exps = np.exp(logits - np.max(logits, axis=1, keepdims=True))
+    # p = (exps / np.sum(exps, axis=1, keepdims=True))[0]    # shape (num_classes,)
+    # p_happy, p_sad = float(p[0]), float(p[1])
+    p = _softmax(logits)[0]                                      # (num_classes,)
     p_happy, p_sad = float(p[0]), float(p[1])
 
-    # 3) Decision with thresholds from config
-    th_sad = INFERENCE_SETTINGS["sad_threshold"]
+    th_sad  = INFERENCE_SETTINGS["sad_threshold"]
     min_conf = INFERENCE_SETTINGS["min_confidence"]
 
-    idx = 1 if p_sad >= th_sad else 0            # prefer 'sad' once threshold crosses
-    conf = float(p[idx])
+    # Prefer 'sad' once it crosses the threshold; otherwise 'happy'
+    idx  = 1 if p_sad >= th_sad else 0
+    conf = p[idx]
 
     emotion = "Uncertain" if conf < min_conf else CLASSES[idx]
-    reply = RESPONSES[emotion]
+    reply   = RESPONSES[emotion]
     return emotion, conf, reply
+
 
 # --- Run ---
 if __name__ == "__main__":

@@ -19,8 +19,8 @@ FEATURE_SETTINGS = {
     "n_mfcc": 13,
     "use_delta": True,
     "use_delta_delta": True,
-    "max_len": 251,          # pad/truncate frames
-    "max_duration": 4.0      # seconds to load
+    "max_len": 313,          # pad/truncate frames
+    "max_duration": 5.0      # seconds to load
 }
 
 # === Training Defaults ===
