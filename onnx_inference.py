@@ -2,7 +2,7 @@ import librosa
 import numpy as np
 import sounddevice as sd
 import onnxruntime as ort
-from config import FEATURE_SETTINGS, CLASSES, RESPONSES
+from config import FEATURE_SETTINGS, CLASSES, RESPONSES, INFERENCE_SETTINGS
 from extract_features import extract_mfcc
 
 # --- Load ONNX Model ---
@@ -10,41 +10,19 @@ onnx_model_path = "models/best_model.onnx"
 session = ort.InferenceSession(onnx_model_path)
 input_name = session.get_inputs()[0].name
 
-# --- Constants ---
-DURATION = 3.0
+# --- Constants (match config) ---
+DURATION = FEATURE_SETTINGS['max_duration']
 SAMPLE_RATE = FEATURE_SETTINGS['sample_rate']
-MAX_TIMESTEPS = 150
+MAX_TIMESTEPS = FEATURE_SETTINGS['max_len']
 
-# --- Record Audio ---2
+# --- Record Audio ---
 def record_audio(duration=DURATION, sr=SAMPLE_RATE):
     print(f"\n Recording for {duration} seconds...")
-    audio = sd.rec(int(duration * sr), samplerate=sr, channels=1)
+    audio = sd.rec(int(duration * sr), samplerate=sr, channels=1, dtype='float32')
     sd.wait()
     return audio.flatten()
 
-# --- Extract Features ---
-# def extract_mfcc_from_array(y, sr):                       # Now I am not going to use it, to make the centralised the code .
-#     mel_spec = librosa.feature.melspectrogram(
-#         y=y,
-#         sr=sr,
-#         n_fft=FEATURE_SETTINGS['n_fft'],
-#         hop_length=FEATURE_SETTINGS['hop_length'],
-#         n_mels=FEATURE_SETTINGS['n_mels'],
-#         fmin=FEATURE_SETTINGS['fmin'],
-#         fmax=FEATURE_SETTINGS['fmax']
-#     )
-#     mel_db = librosa.power_to_db(mel_spec)
-#     mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
-
-#     features = [mfcc]
-#     if FEATURE_SETTINGS['use_delta']:
-#         features.append(librosa.feature.delta(mfcc))
-#     if FEATURE_SETTINGS['use_delta_delta']:
-#         features.append(librosa.feature.delta(mfcc, order=2))
-
-#     return np.vstack(features).T
-
-# --- Normalize Feature Length ---
+# --- Normalize Feature Length (kept for compatibility; extractor already pads) ---
 def normalize_length(features, target_len=MAX_TIMESTEPS):
     if features.shape[0] < target_len:
         pad_amt = target_len - features.shape[0]
@@ -53,31 +31,31 @@ def normalize_length(features, target_len=MAX_TIMESTEPS):
         features = features[:target_len, :]
     return features.astype(np.float32)
 
-# --- Predict ---
-# def predict_emotion(audio):
-#     features = extract_mfcc_from_array(audio, SAMPLE_RATE)
-#     features = normalize_length(features)
-#     input_data = features[np.newaxis, :, :]  # shape (1, 150, 39)
-#     outputs = session.run(None, {input_name: input_data})
-#     predicted_idx = np.argmax(outputs[0])
-#     return CLASSES[predicted_idx]
-
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x)
+    e = np.exp(x)
+    return e / np.sum(e)
 
 # ─── Predict ────────────────────────────────────────────────────────────
 def predict_emotion(audio: np.ndarray):
-    # 1) Denoise & MFCC → (MAX_LEN, n_mfcc)
-    
-    feats = extract_mfcc(array=audio, sr=SAMPLE_RATE)
-    # 2) Batch dimension
-    inp = feats[np.newaxis, :, :]
-    # 3) ONNX inference (raw logits)
-    raw = session.run(None, {input_name: inp})[0][0]
-    # 4) Softmax to true probabilities
-    exps= np.exp(raw - np.max(raw))
-    probs= exps / exps.sum()
-    # 5) Pick label + threshold
-    idx, conf = int(np.argmax(probs)), float(np.max(probs))
-    emotion = "Uncertain" if conf < 0.5 else CLASSES[idx]
+    # 1) MFCC via central extractor (pads/normalizes per config)
+    feats = extract_mfcc(audio_path=None, array=audio, sr=SAMPLE_RATE)  # (MAX_TIMESTEPS, 39)
+    input_data = feats[np.newaxis, :, :]  # (1, T, F)
+
+    # 2) ONNX forward -> logits -> probabilities
+    outputs = session.run(None, {input_name: input_data})
+    logits = outputs[0].squeeze()          # shape (num_classes,)
+    p = _softmax(logits).astype(float)     # numpy float probs
+    p_happy, p_sad = float(p[0]), float(p[1])
+
+    # 3) Decision with thresholds from config
+    th_sad = INFERENCE_SETTINGS["sad_threshold"]
+    min_conf = INFERENCE_SETTINGS["min_confidence"]
+
+    idx = 1 if p_sad >= th_sad else 0            # prefer 'sad' once threshold crosses
+    conf = float(p[idx])
+
+    emotion = "Uncertain" if conf < min_conf else CLASSES[idx]
     reply = RESPONSES[emotion]
     return emotion, conf, reply
 

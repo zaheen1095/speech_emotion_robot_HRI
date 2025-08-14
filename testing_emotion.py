@@ -5,6 +5,7 @@ import numpy as np
 from extract_features import extract_mfcc
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURE_SETTINGS, CLASSES
+from config import FEATURE_SETTINGS, CLASSES, INFERENCE_SETTINGS
 
 TEST_ROOT = "datasets/raw_audio/test"   # adjust if needed
 

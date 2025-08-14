@@ -5,37 +5,44 @@ from pathlib import Path
 from tqdm import tqdm
 from config import FEATURE_SETTINGS, RESAMPLED_DIR, FEATURES_DIR
 import noisereduce as nr
+from utils import pad_sequence   # <-- added
 
-def extract_mfcc(audio_path: str = None, array:np.ndarray = None, sr:int = None) -> np.ndarray:
+def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = None) -> np.ndarray:
     try:
+        # --- Load ---
         if audio_path is not None:
-            y, sr = librosa.load(
-                audio_path,
-                sr=FEATURE_SETTINGS['sample_rate'],
-                duration= FEATURE_SETTINGS.get('max_duration', 3.0)
-            )
-        else :
+            y, sr = librosa.load(audio_path, sr=FEATURE_SETTINGS['sample_rate'])
+        else:
             assert array is not None and sr == FEATURE_SETTINGS['sample_rate'], \
-            "When not using audio_path, you must pass array and matching sr"
+                "When not using audio_path, you must pass array and matching sr"
             y = array
 
+        # --- Safety: no NaNs/Infs ---
+        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-        #-------- Noise reduction -------- #
-        # noise_clip = y[: int(0.5 * sr)]
-        # y = nr.reduce_noise(
-        #     y=y,                
-        #     sr=sr,              
-        #     y_noise=noise_clip, 
-        #     n_fft=FEATURE_SETTINGS['n_fft'],
-        #     hop_length=FEATURE_SETTINGS['hop_length']
-        # )
+        # --- Trim leading/trailing silence (keeps emotional core tighter) ---
+        y_trim, _ = librosa.effects.trim(y, top_db=30)
+        # Fallback if trimming leaves too little audio
+        if y_trim.size >= int(0.25 * sr):   # ≥ 250 ms remains
+            y = y_trim
+        # else keep original y
 
-        # **NEW**: ensure no NaNs/Infs slip through 
-        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)       # for the checking NAN in the dataset.
+        # --- Optional safer denoise (leave commented unless necessary) ---
+        # y = reduce_noise_safely(y, sr)
 
-        #------ end noise reduction code -------#
+        # --- Pick highest-energy window instead of "first N seconds" ---
+        max_duration = FEATURE_SETTINGS.get('max_duration', 4.0)
+        target = int(max_duration * sr)
+        if len(y) > target:
+            hop = int(0.10 * sr)  # slide 100ms
+            best_i, best_rms = 0, -1.0
+            for i in range(0, len(y) - target, hop):
+                rms = float(np.mean(np.abs(y[i:i+target])))
+                if rms > best_rms:
+                    best_rms, best_i = rms, i
+            y = y[best_i:best_i + target]
 
-        #--- Mel-spectogram -> MFCC
+        # --- Mel -> MFCC (+Δ/+ΔΔ) ---
         mel_spec = librosa.feature.melspectrogram(
             y=y,
             sr=sr,
@@ -48,28 +55,24 @@ def extract_mfcc(audio_path: str = None, array:np.ndarray = None, sr:int = None)
         mel_db = librosa.power_to_db(mel_spec)
 
         mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
-
-        features = [mfcc]
+        feats_list = [mfcc]
         if FEATURE_SETTINGS.get('use_delta', False):
-            features.append(librosa.feature.delta(mfcc))
+            feats_list.append(librosa.feature.delta(mfcc))
         if FEATURE_SETTINGS.get('use_delta_delta', False):
-            features.append(librosa.feature.delta(mfcc, order=2))
-        
-        stacked = np.vstack(features).T
-        #-- end MFCC 
+            feats_list.append(librosa.feature.delta(mfcc, order=2))
 
-        # ─── Pad or truncate to fixed length ────────────────────────
-        max_len = FEATURE_SETTINGS.get('max_len', 150)
-        if stacked.shape[0] < max_len:
-            pad = max_len - stacked.shape[0]
-            stacked = np.pad(stacked, ((0, pad), (0, 0)))
-        else:
-            stacked = stacked[:max_len, :]
-        # ─── End shape normalization ────────────────────────────────
+        # (T, F)
+        feats = np.vstack(feats_list).T
 
-        return stacked.astype(np.float32)
+        # --- CMVN (per-utterance) ---
+        mean = feats.mean(axis=0, keepdims=True)
+        std  = feats.std(axis=0, keepdims=True) + 1e-8
+        feats = (feats - mean) / std
 
-        # return np.vstack(features).T
+        # --- Pad/trim once (consistent with config) ---
+        feats = pad_sequence(feats, max_len=FEATURE_SETTINGS['max_len']).astype(np.float32)
+
+        return feats
 
     except Exception as e:
         raise ValueError(f"Error processing {audio_path}: {str(e)}")
@@ -92,6 +95,8 @@ def process_audio_files(split: str):
 
     for emotion in tqdm(os.listdir(split_dir), desc=f"Processing {split}"):
         emotion_dir = split_dir / emotion
+        if not emotion_dir.is_dir():     # <-- added guard
+            continue
         os.makedirs(output_dir / emotion, exist_ok=True)
 
         for filename in os.listdir(emotion_dir):
@@ -101,8 +106,9 @@ def process_audio_files(split: str):
 
                 try:
                     features = extract_mfcc(audio_path=str(input_path))
-                    # features = extract_mfcc(str(input_path))
-                    # features = normalize_length(features)
+                    # Optional sanity warning (keeps your names & logic)
+                    if features.shape[0] != FEATURE_SETTINGS['max_len']:
+                        print(f" Warn: {filename} -> {features.shape[0]} frames (expected {FEATURE_SETTINGS['max_len']}).")
                     np.save(output_path, features)
                 except ValueError as e:
                     print(f" Skipping {filename}: {str(e)}")
