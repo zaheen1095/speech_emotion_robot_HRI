@@ -21,14 +21,14 @@ def extract_mfcc(audio_path: str = None, array:np.ndarray = None, sr:int = None)
 
 
         #-------- Noise reduction -------- #
-        noise_clip = y[: int(0.5 * sr)]
-        y = nr.reduce_noise(
-            y=y,                
-            sr=sr,              
-            y_noise=noise_clip, 
-            n_fft=FEATURE_SETTINGS['n_fft'],
-            hop_length=FEATURE_SETTINGS['hop_length']
-        )
+        # noise_clip = y[: int(0.5 * sr)]
+        # y = nr.reduce_noise(
+        #     y=y,                
+        #     sr=sr,              
+        #     y_noise=noise_clip, 
+        #     n_fft=FEATURE_SETTINGS['n_fft'],
+        #     hop_length=FEATURE_SETTINGS['hop_length']
+        # )
 
         # **NEW**: ensure no NaNs/Infs slip through 
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)       # for the checking NAN in the dataset.

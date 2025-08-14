@@ -1,17 +1,21 @@
-# torch==2.0.0
-# librosa==0.10.0
-# sounddevice==0.4.6
-# onnxruntime==1.15.0
-# numpy==1.24.0
-
-torch
-librosa
-numpy
+torch==2.0.0
+torchvision
+torchaudio
+librosa==0.10.0
+numpy==1.24.0
 matplotlib
 scikit-learn
 seaborn
 soundfile
 tqdm
-sounddevice
+sounddevice==0.4.6
 onnx
-torchvision
+onnxruntime==1.15.0
+
+# second time project installation
+
+# pip install librosa  
+# python -m pip install noisereduce
+# pip install tensorboard
+# conda install -c conda-forge onnx onnxruntime protobuf  or  python -m pip install "onnx>=1.14,<1.18" onnxruntime
+# sounddevice
