@@ -23,7 +23,7 @@ input_dim = FEATURE_SETTINGS['n_mfcc'] * (
     1 + FEATURE_SETTINGS['use_delta'] + FEATURE_SETTINGS['use_delta_delta']
 )
 model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES))
-model.load_state_dict(torch.load("models/best_model.pt", map_location=torch.device('cpu')))
+model.load_state_dict(torch.load("models/best_model.pt", map_location=torch.device('cpu'), weights_only=True))
 model.eval()
 
 # eval

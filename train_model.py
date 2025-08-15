@@ -6,9 +6,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-# from sklearn.model_selection import GroupShuffleSplit
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
@@ -28,7 +26,7 @@ class FeatureDataset(Dataset):
         y = self.labels[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
-# --- Load Training Data ---
+# --- Load Training Data (NO validation split) ---
 def load_data():
     X, y = [], []
     for idx, emotion in enumerate(CLASSES):
@@ -37,14 +35,13 @@ def load_data():
             if file.endswith(".npy"):
                 X.append(str(emotion_dir / file))
                 y.append(idx)
-    return train_test_split(X, y, test_size=0.1, stratify=y, random_state=42)
-
+    return X, y  # only train
 
 def _plot_confusion_matrix(cm, class_names):
     import itertools
     fig, ax = plt.subplots(figsize=(4, 4), dpi=120)
-    im = ax.imshow(cm, interpolation='nearest')
-    ax.set_title('Val Confusion Matrix')
+    ax.imshow(cm, interpolation='nearest')
+    ax.set_title('Confusion Matrix (train-as-val)')
     ax.set_xticks(range(len(class_names)))
     ax.set_yticks(range(len(class_names)))
     ax.set_xticklabels(class_names, rotation=45, ha='right')
@@ -63,7 +60,7 @@ def _plot_training_curves(hist, out_dir):
     # Loss
     fig1, ax1 = plt.subplots(figsize=(5,3), dpi=120)
     ax1.plot(hist['loss_train'], label='train')
-    ax1.plot(hist['loss_val'], label='val')
+    ax1.plot(hist['loss_val'], label='val')  # here 'val' == evaluation on train set
     ax1.set_title('Loss vs Epoch')
     ax1.set_xlabel('Epoch'); ax1.set_ylabel('Loss'); ax1.legend()
     fig1.tight_layout()
@@ -71,8 +68,8 @@ def _plot_training_curves(hist, out_dir):
 
     # Metrics
     fig2, ax2 = plt.subplots(figsize=(5,3), dpi=120)
-    ax2.plot(hist['acc_val'], label='val_acc')
-    ax2.plot(hist['recall_sad'], label='val_recall_sad')
+    ax2.plot(hist['acc_val'], label='val_acc')           # eval on train set
+    ax2.plot(hist['recall_sad'], label='val_recall_sad') # eval on train set
     ax2.set_title('Validation Metrics vs Epoch')
     ax2.set_xlabel('Epoch'); ax2.set_ylabel('Score'); ax2.legend()
     fig2.tight_layout()
@@ -80,10 +77,9 @@ def _plot_training_curves(hist, out_dir):
 
 # --- Training Function ---
 def train():
-    print("\n🚀 Loading data...")
-    X_train, X_val, y_train, y_val = load_data()
+    print("\n🚀 Loading data (no validation split)...")
+    X_train, y_train = load_data()
     train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(FeatureDataset(X_val, y_val), batch_size=BATCH_SIZE)
 
     print("\n Initializing model...")
     model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
@@ -91,9 +87,9 @@ def train():
     model = model.to(device)
 
     print(" Train balance:", np.bincount(np.array(y_train), minlength=len(CLASSES)))
-    print(" Val balance:",   np.bincount(np.array(y_val),   minlength=len(CLASSES)))
+    print(" Val balance:   (using train for monitoring) ->", np.bincount(np.array(y_train), minlength=len(CLASSES)))
 
-    # class weights on same device
+    # class weights (kept) on same device
     weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
 
@@ -124,15 +120,14 @@ def train():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             total_loss += float(loss.item())
-
         avg_train_loss = total_loss / max(1, len(train_loader))
 
-        # --- Validation ---
+        # --- "Validation" pass = evaluate on the training set ---
         model.eval()
         all_preds, all_labels = [], []
         val_loss = 0.0
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            for inputs, labels in train_loader:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 outputs = model(inputs)
@@ -141,23 +136,22 @@ def train():
                 _, preds = torch.max(outputs, 1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
-
-        val_loss /= max(1, len(val_loader))
+        val_loss /= max(1, len(train_loader))
 
         np_preds = np.array(all_preds)
         np_labels = np.array(all_labels)
         val_acc = (np_preds == np_labels).mean()
 
-        # compute always for logs/plots
+        # metrics (computed on training set)
         sad = 1
         tp = int(((np_preds == sad) & (np_labels == sad)).sum())
         fn = int(((np_preds != sad) & (np_labels == sad)).sum())
         recall_sad = tp / (tp + fn) if (tp + fn) else 0.0
         f1_macro = f1_score(np_labels, np_preds, average='macro')
         pred_dist = np.bincount(np_preds, minlength=len(CLASSES))
-        cm = confusion_matrix(np_labels, np_preds)
+        cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
 
-        # --- Choose monitor metric from config ---
+        # --- Choose monitor metric from config (on training set) ---
         if MONITOR_METRIC == "f1_score_macro":
             monitor_value = f1_macro
         elif MONITOR_METRIC == "recall_sad":
@@ -165,35 +159,35 @@ def train():
         else:
             monitor_value = val_acc
 
+        # keep your existing names
+        hist['loss_train'].append(avg_train_loss)
+        hist['loss_val'].append(val_loss)
+        hist['acc_val'].append(val_acc)
+        hist['recall_sad'].append(recall_sad)
+
         scheduler.step(monitor_value)
 
         # --- TensorBoard scalars ---
         writer.add_scalar('Loss/train', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val', val_loss, epoch)
+        writer.add_scalar('Loss/val', val_loss, epoch)                      # here 'val' == eval on train
         writer.add_scalar('Accuracy/val', val_acc, epoch)
         writer.add_scalar('F1/macro_val', f1_macro, epoch)
         writer.add_scalar(f'Monitor Metric/{MONITOR_METRIC}', monitor_value, epoch)
 
-        # --- TensorBoard val confusion matrix image ---
-        cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
+        # --- Confusion matrix image (train-as-val) ---
         fig_cm = _plot_confusion_matrix(cm, class_names=CLASSES)
         writer.add_figure('ConfusionMatrix/val', fig_cm, epoch)
         plt.close(fig_cm)
 
-        # --- keep history for static PNGs ---
-        hist['loss_train'].append(avg_train_loss)   # <-- FIX
-        hist['loss_val'].append(val_loss)           # <-- FIX
-        hist['acc_val'].append(val_acc)             # <-- FIX
-        hist['recall_sad'].append(recall_sad)       # <-- FIX
-
         print(
             f"Epoch {epoch+1}/{EPOCHS} | "
-            f"Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"Val Acc: {val_acc:.2f} | Val Recall(sad): {recall_sad:.2f} | "
+            f"Loss: {total_loss:.4f} | Val Loss: {val_loss:.4f} | "
+            f"Val Acc: {val_acc:.2f} | Val Recall(sad): "
+            f"{(monitor_value if MONITOR_METRIC=='recall_sad' else 0.0):.2f} | "
             f"F1(macro): {f1_macro:.2f} | PredDist: {pred_dist.tolist()}"
         )
 
-        # --- Early stopping / checkpoint on monitor metric ---
+        # --- Early stopping / checkpoint on monitor metric (train-as-val) ---
         if monitor_value > best_monitor_metric:
             best_monitor_metric = monitor_value
             torch.save(model.state_dict(), MODEL_DIR / "best_model.pt")
@@ -205,10 +199,8 @@ def train():
                 print(" Early stopping!")
                 break
 
-    # save static PNG curves like in papers
     _plot_training_curves(hist, MODEL_DIR)
     print(f"Saved plots to: {MODEL_DIR}")
-
     writer.close()
 
 if __name__ == "__main__":

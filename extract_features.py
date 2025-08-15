@@ -29,9 +29,7 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
         # y = reduce_noise_safely(y, sr)
 
         # --- Pick highest-energy window (target = FEATURE_SETTINGS['max_duration']) ---
-        # max_duration = FEATURE_SETTINGS.get('max_duration', 4.0)
-        max_duration = FEATURE_SETTINGS['max_duration']  # now uses 5.0 from config
-
+        max_duration = FEATURE_SETTINGS.get('max_duration', 5.0)
         target = int(max_duration * sr)
         if len(y) > target:
             hop = int(0.10 * sr)  # slide 100ms
@@ -52,9 +50,10 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
             fmin=FEATURE_SETTINGS['fmin'],
             fmax=FEATURE_SETTINGS['fmax']
         )
-        mel_db = librosa.power_to_db(mel_spec)
+        # mel_db = librosa.power_to_db(mel_spec)
 
-        mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
+        
+        mfcc = librosa.feature.mfcc(S=mel_spec, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
         feats_list = [mfcc]
         if FEATURE_SETTINGS.get('use_delta', False):
             feats_list.append(librosa.feature.delta(mfcc))

@@ -46,13 +46,13 @@ def test():
     print("\n Loading trained model...")
     model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_state_dict(torch.load(MODEL_DIR / "best_model.pt", map_location=device))
+    model.load_state_dict(torch.load(MODEL_DIR / "best_model.pt", map_location=device, weights_only=True))
     model.to(device)
     model.eval()
 
     y_true = []
     y_pred = []
-
+    print("Sample prediction distribution:")
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
@@ -60,6 +60,8 @@ def test():
             _, preds = torch.max(outputs, 1)
             y_true.extend(labels.cpu().numpy().tolist())
             y_pred.extend(preds.cpu().numpy().tolist())
+            test_sample = torch.randn(1, 313, 39).to(device)
+            print(torch.softmax(model(test_sample), dim=1))
 
     print("\n Classification Report:")
     report = classification_report(y_true, y_pred, target_names=CLASSES, digits=4)

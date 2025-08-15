@@ -13,8 +13,8 @@ FEATURE_SETTINGS = {
     "sample_rate": 16000,
     "n_fft": 512,         # etc…
     "hop_length": 256,
-    "n_mels": 40,
-    "fmin": 20,
+    "n_mels": 64,
+    "fmin": 50,
     "fmax": 8000,
     "n_mfcc": 13,
     "use_delta": True,
@@ -31,7 +31,7 @@ RESPONSES = {
     "sad": "I'm here for you. It's okay to feel sad. Do you want to talk about it?",
     "Uncertain": "I am not sure how you are feeling. Would you like to try again."
 }
-CLASS_WEIGHTS = [1.0, 1.10]          # [happy, sad]
+CLASS_WEIGHTS = [1.0, 1.0]          # [happy, sad]
 LABEL_SMOOTHING = 0.0
 MONITOR_METRIC = "recall_sad"       # checkpoint/early-stop on this
 
