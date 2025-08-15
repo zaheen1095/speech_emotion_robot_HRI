@@ -2,9 +2,9 @@
 import os, glob
 import torch
 import numpy as np
+import pandas as pd
 from extract_features import extract_mfcc
 from models.cnn_bilstm import CNNBiLSTM
-from config import FEATURE_SETTINGS, CLASSES
 from config import FEATURE_SETTINGS, CLASSES, INFERENCE_SETTINGS
 
 TEST_ROOT = "datasets/raw_audio/test"   # adjust if needed
@@ -23,12 +23,17 @@ input_dim = FEATURE_SETTINGS['n_mfcc'] * (
     1 + FEATURE_SETTINGS['use_delta'] + FEATURE_SETTINGS['use_delta_delta']
 )
 model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES))
-model.load_state_dict(torch.load("models/best_model.pt", map_location=torch.device('cpu'), weights_only=True))
+state = torch.load("models/best_model.pt", map_location=torch.device('cpu'), weights_only=True)
+missing, unexpected = model.load_state_dict(state, strict=False)
+if missing or unexpected:
+    print("load_state_dict() -> missing:", missing, "unexpected:", unexpected)
 model.eval()
 
 # eval
 conf_mat = np.zeros((len(CLASSES), len(CLASSES)), dtype=int)
 per_file = []
+sad_idx = CLASSES.index("sad")
+sad_thr = INFERENCE_SETTINGS["sad_threshold"]
 
 with torch.no_grad():
     for audio_path, true_idx in sorted(pairs):
@@ -41,7 +46,11 @@ with torch.no_grad():
         inp = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # [1, T, D]
         logits = model(inp)
         probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
-        pred_idx = int(np.argmax(probs))
+
+        # pred_idx = int(np.argmax(probs))
+        pred_idx = sad_idx if probs[sad_idx] >= sad_thr else int(np.argmax(probs))
+
+
         conf_mat[true_idx, pred_idx] += 1
 
         # optional: quick warning if filename prefix disagrees with folder label
@@ -78,3 +87,15 @@ print(header)
 for i, cls in enumerate(CLASSES):
     row = " ".join([f"{conf_mat[i,j]:>8d}" for j in range(len(CLASSES))])
     print(f"{cls:10}: {row}")
+
+
+
+os.makedirs("results", exist_ok=True)
+df = pd.DataFrame([
+    {"file": os.path.basename(p),
+     "p_happy": float(probs[0]), "p_sad": float(probs[1]),
+     "pred": CLASSES[pi]}
+    for p, probs, pi in per_file
+])
+df.to_csv("results/per_file_results.csv", index=False)
+print("Wrote results/per_file_results.csv")
