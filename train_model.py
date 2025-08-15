@@ -6,8 +6,9 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit
+# from sklearn.model_selection import GroupShuffleSplit
 from pathlib import Path
+from sklearn.model_selection import train_test_split
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
@@ -29,18 +30,15 @@ class FeatureDataset(Dataset):
 
 # --- Load Training Data ---
 def load_data():
-    X, y, groups = [], [], []
+    X, y = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'train' / emotion
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
                 X.append(str(emotion_dir / file))
                 y.append(idx)
-                # group by speaker or prefix (prevents speaker leakage)
-                groups.append(file.split('_', 1)[0].lower())
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
-    train_idx, val_idx = next(gss.split(X, y, groups=groups))
-    return [X[i] for i in train_idx], [X[i] for i in val_idx], [y[i] for i in train_idx], [y[i] for i in val_idx]
+    return train_test_split(X, y, test_size=0.1, stratify=y, random_state=42)
+
 
 def _plot_confusion_matrix(cm, class_names):
     import itertools
@@ -53,7 +51,6 @@ def _plot_confusion_matrix(cm, class_names):
     ax.set_yticklabels(class_names)
     ax.set_ylabel('True')
     ax.set_xlabel('Predicted')
-
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
         ax.text(j, i, int(cm[i, j]), ha="center", va="center")
     fig.tight_layout()
@@ -93,11 +90,14 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
+    print(" Train balance:", np.bincount(np.array(y_train), minlength=len(CLASSES)))
+    print(" Val balance:",   np.bincount(np.array(y_val),   minlength=len(CLASSES)))
+
     # class weights on same device
     weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
 
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
     writer = SummaryWriter()
     hist = {'loss_train': [], 'loss_val': [], 'acc_val': [], 'recall_sad': []}
@@ -121,6 +121,7 @@ def train():
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             total_loss += float(loss.item())
 
@@ -153,6 +154,8 @@ def train():
         fn = int(((np_preds != sad) & (np_labels == sad)).sum())
         recall_sad = tp / (tp + fn) if (tp + fn) else 0.0
         f1_macro = f1_score(np_labels, np_preds, average='macro')
+        pred_dist = np.bincount(np_preds, minlength=len(CLASSES))
+        cm = confusion_matrix(np_labels, np_preds)
 
         # --- Choose monitor metric from config ---
         if MONITOR_METRIC == "f1_score_macro":
@@ -166,21 +169,29 @@ def train():
 
         # --- TensorBoard scalars ---
         writer.add_scalar('Loss/train', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val', val_loss, epoch)                      # NEW
+        writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('Accuracy/val', val_acc, epoch)
-        writer.add_scalar('F1/macro_val', f1_macro, epoch)                  # NEW
+        writer.add_scalar('F1/macro_val', f1_macro, epoch)
         writer.add_scalar(f'Monitor Metric/{MONITOR_METRIC}', monitor_value, epoch)
 
-        # --- TensorBoard val confusion matrix image (optional) ---
+        # --- TensorBoard val confusion matrix image ---
         cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
         fig_cm = _plot_confusion_matrix(cm, class_names=CLASSES)
-        writer.add_figure('ConfusionMatrix/val', fig_cm, epoch)             # NEW
+        writer.add_figure('ConfusionMatrix/val', fig_cm, epoch)
         plt.close(fig_cm)
 
-        print(f"Epoch {epoch+1}/{EPOCHS} | "
-              f"Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.2f} | Val Recall(sad): {recall_sad:.2f} | "
-              f"F1(macro): {f1_macro:.2f}")
+        # --- keep history for static PNGs ---
+        hist['loss_train'].append(avg_train_loss)   # <-- FIX
+        hist['loss_val'].append(val_loss)           # <-- FIX
+        hist['acc_val'].append(val_acc)             # <-- FIX
+        hist['recall_sad'].append(recall_sad)       # <-- FIX
+
+        print(
+            f"Epoch {epoch+1}/{EPOCHS} | "
+            f"Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+            f"Val Acc: {val_acc:.2f} | Val Recall(sad): {recall_sad:.2f} | "
+            f"F1(macro): {f1_macro:.2f} | PredDist: {pred_dist.tolist()}"
+        )
 
         # --- Early stopping / checkpoint on monitor metric ---
         if monitor_value > best_monitor_metric:
@@ -195,7 +206,7 @@ def train():
                 break
 
     # save static PNG curves like in papers
-    _plot_training_curves(hist, MODEL_DIR)                                  # NEW
+    _plot_training_curves(hist, MODEL_DIR)
     print(f"Saved plots to: {MODEL_DIR}")
 
     writer.close()
