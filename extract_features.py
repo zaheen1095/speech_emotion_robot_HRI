@@ -50,10 +50,10 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
             fmin=FEATURE_SETTINGS['fmin'],
             fmax=FEATURE_SETTINGS['fmax']
         )
-        # mel_db = librosa.power_to_db(mel_spec)
+        mel_db = librosa.power_to_db(mel_spec)
 
         
-        mfcc = librosa.feature.mfcc(S=mel_spec, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
+        mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
         feats_list = [mfcc]
         if FEATURE_SETTINGS.get('use_delta', False):
             feats_list.append(librosa.feature.delta(mfcc))

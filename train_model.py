@@ -11,6 +11,7 @@ from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 # --- Custom Dataset Loader ---
 class FeatureDataset(Dataset):
@@ -28,14 +29,22 @@ class FeatureDataset(Dataset):
 
 # --- Load Training Data (NO validation split) ---
 def load_data():
-    X, y = [], []
+    X_all, y_all = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'train' / emotion
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
-                X.append(str(emotion_dir / file))
-                y.append(idx)
-    return X, y  # only train
+                X_all.append(str(emotion_dir / file))
+                y_all.append(idx)
+    
+    # Split all data into 80% for training and 20% for validation
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_all, y_all, 
+        test_size=0.20,      # 20% of data will be for validation
+        random_state=42,     # Ensures the split is the same every time
+        stratify=y_all       # Keeps the balance of happy/sad in both sets
+    )
+    return X_train, y_train, X_val, y_val
 
 def _plot_confusion_matrix(cm, class_names):
     import itertools
@@ -78,8 +87,10 @@ def _plot_training_curves(hist, out_dir):
 # --- Training Function ---
 def train():
     print("\n🚀 Loading data (no validation split)...")
-    X_train, y_train = load_data()
+    X_train, y_train ,X_val, y_val= load_data()
     train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(FeatureDataset(X_val, y_val), batch_size=BATCH_SIZE, shuffle=False)
+
 
     print("\n Initializing model...")
     model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
@@ -127,7 +138,7 @@ def train():
         all_preds, all_labels = [], []
         val_loss = 0.0
         with torch.no_grad():
-            for inputs, labels in train_loader:
+            for inputs, labels in val_loader:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
                 outputs = model(inputs)

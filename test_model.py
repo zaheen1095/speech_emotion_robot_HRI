@@ -60,8 +60,7 @@ def test():
             _, preds = torch.max(outputs, 1)
             y_true.extend(labels.cpu().numpy().tolist())
             y_pred.extend(preds.cpu().numpy().tolist())
-            test_sample = torch.randn(1, 313, 39).to(device)
-            print(torch.softmax(model(test_sample), dim=1))
+            
 
     print("\n Classification Report:")
     report = classification_report(y_true, y_pred, target_names=CLASSES, digits=4)
