@@ -6,8 +6,9 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit
+# from sklearn.model_selection import GroupShuffleSplit
 from pathlib import Path
+from sklearn.model_selection import train_test_split
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
@@ -29,19 +30,15 @@ class FeatureDataset(Dataset):
 
 # --- Load Training Data ---
 def load_data():
-    X, y, groups = [], [], []
+    X, y = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'train' / emotion
-        if not emotion_dir.exists():   # <-- guard
-            continue
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
                 X.append(str(emotion_dir / file))
                 y.append(idx)
-                groups.append(file.split('_', 1)[0].lower())
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
-    train_idx, val_idx = next(gss.split(X, y, groups=groups))
-    return [X[i] for i in train_idx], [X[i] for i in val_idx], [y[i] for i in train_idx], [y[i] for i in val_idx]
+    return train_test_split(X, y, test_size=0.1, stratify=y, random_state=42)
+
 
 def _plot_confusion_matrix(cm, class_names):
     import itertools
