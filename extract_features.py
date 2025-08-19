@@ -21,7 +21,7 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
         # --- Trim leading/trailing silence (keeps emotional core tighter) ---
-        y_trim, _ = librosa.effects.trim(y, top_db=30)
+        y_trim, _ = librosa.effects.trim(y, top_db=200)
         if y_trim.size >= int(0.25 * sr):   # ≥ 250 ms remains
             y = y_trim
 
@@ -31,14 +31,17 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
         # --- Pick highest-energy window (target = FEATURE_SETTINGS['max_duration']) ---
         max_duration = FEATURE_SETTINGS.get('max_duration', 5.0)
         target = int(max_duration * sr)
+        # if len(y) > target:
+        #     hop = int(0.10 * sr)  # slide 100ms
+        #     best_i, best_rms = 0, -1.0
+        #     for i in range(0, len(y) - target, hop):
+        #         rms = float(np.mean(np.abs(y[i:i+target])))
+        #         if rms > best_rms:
+        #             best_rms, best_i = rms, i
+        #     y = y[best_i:best_i + target]
         if len(y) > target:
-            hop = int(0.10 * sr)  # slide 100ms
-            best_i, best_rms = 0, -1.0
-            for i in range(0, len(y) - target, hop):
-                rms = float(np.mean(np.abs(y[i:i+target])))
-                if rms > best_rms:
-                    best_rms, best_i = rms, i
-            y = y[best_i:best_i + target]
+            start = (len(y) - target) // 2
+            y = y[start:start + target]
 
         # --- Mel -> MFCC (+Δ/+ΔΔ) ---
         mel_spec = librosa.feature.melspectrogram(

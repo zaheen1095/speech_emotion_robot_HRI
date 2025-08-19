@@ -31,9 +31,9 @@ RESPONSES = {
     "sad": "I'm here for you. It's okay to feel sad. Do you want to talk about it?",
     "Uncertain": "I am not sure how you are feeling. Would you like to try again."
 }
-CLASS_WEIGHTS = [1.0, 1.1]          # [happy, sad]
+CLASS_WEIGHTS = [1.0, 1.4]          # [happy, sad]
 LABEL_SMOOTHING = 0.0
-MONITOR_METRIC = "recall_sad"       # checkpoint/early-stop on this
+MONITOR_METRIC = "f1_score_macro"       # checkpoint/early-stop on this
 
 INFERENCE_SETTINGS = {
     "sad_threshold": 0.45,          # prefer 'sad' when P(sad) >= threshold

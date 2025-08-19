@@ -5,13 +5,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.model_selection import train_test_split
 import numpy as np
 from pathlib import Path
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
 
 # --- Custom Dataset Loader ---
 class FeatureDataset(Dataset):
@@ -27,30 +27,35 @@ class FeatureDataset(Dataset):
         y = self.labels[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
-# --- Load Training Data (NO validation split) ---
+# --- Load Training Data WITH validation split ---
 def load_data():
     X_all, y_all = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'train' / emotion
+        if not emotion_dir.exists():
+            continue
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
                 X_all.append(str(emotion_dir / file))
                 y_all.append(idx)
-    
-    # Split all data into 80% for training and 20% for validation
+
+    if not X_all:
+        raise SystemExit(f"No .npy features found under {FEATURES_DIR}/train/<{','.join(CLASSES)}>")
+
+    # 80/20 split inside the training set -> true validation
     X_train, X_val, y_train, y_val = train_test_split(
-        X_all, y_all, 
-        test_size=0.20,      # 20% of data will be for validation
-        random_state=42,     # Ensures the split is the same every time
-        stratify=y_all       # Keeps the balance of happy/sad in both sets
+        X_all, y_all,
+        test_size=0.20,
+        stratify=y_all,
+        random_state=42
     )
     return X_train, y_train, X_val, y_val
 
-def _plot_confusion_matrix(cm, class_names):
+def _plot_confusion_matrix(cm, class_names, title='Confusion Matrix'):
     import itertools
     fig, ax = plt.subplots(figsize=(4, 4), dpi=120)
-    ax.imshow(cm, interpolation='nearest')
-    ax.set_title('Confusion Matrix (train-as-val)')
+    ax.imshow(cm, interpolation='nearest', cmap='Blues')
+    ax.set_title(title)
     ax.set_xticks(range(len(class_names)))
     ax.set_yticks(range(len(class_names)))
     ax.set_xticklabels(class_names, rotation=45, ha='right')
@@ -69,7 +74,7 @@ def _plot_training_curves(hist, out_dir):
     # Loss
     fig1, ax1 = plt.subplots(figsize=(5,3), dpi=120)
     ax1.plot(hist['loss_train'], label='train')
-    ax1.plot(hist['loss_val'], label='val')  # here 'val' == evaluation on train set
+    ax1.plot(hist['loss_val'], label='val')
     ax1.set_title('Loss vs Epoch')
     ax1.set_xlabel('Epoch'); ax1.set_ylabel('Loss'); ax1.legend()
     fig1.tight_layout()
@@ -77,35 +82,40 @@ def _plot_training_curves(hist, out_dir):
 
     # Metrics
     fig2, ax2 = plt.subplots(figsize=(5,3), dpi=120)
-    ax2.plot(hist['acc_val'], label='val_acc')           # eval on train set
-    ax2.plot(hist['recall_sad'], label='val_recall_sad') # eval on train set
+    ax2.plot(hist['acc_val'], label='val_acc')
+    ax2.plot(hist['recall_sad'], label='val_recall_sad')
     ax2.set_title('Validation Metrics vs Epoch')
     ax2.set_xlabel('Epoch'); ax2.set_ylabel('Score'); ax2.legend()
     fig2.tight_layout()
     fig2.savefig(out_dir / 'curves_metrics.png'); plt.close(fig2)
 
-# --- Training Function ---
 def train():
-    print("\n🚀 Loading data (no validation split)...")
-    X_train, y_train ,X_val, y_val= load_data()
-    train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(FeatureDataset(X_val, y_val), batch_size=BATCH_SIZE, shuffle=False)
+    print("\n🚀 Loading data with proper validation split...")
+    X_train, y_train, X_val, y_val = load_data()
 
+    train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    val_loader   = DataLoader(FeatureDataset(X_val,   y_val),   batch_size=BATCH_SIZE, shuffle=False)
 
     print("\n Initializing model...")
-    model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
+    input_dim = FEATURE_SETTINGS['n_mfcc'] * (
+        1 + int(FEATURE_SETTINGS.get('use_delta', False)) +
+        1 + int(FEATURE_SETTINGS.get('use_delta_delta', False)) - 1  # compact way to add deltas if True
+    )
+    # (equivalently) input_dim = FEATURE_SETTINGS['n_mfcc'] * (1 + bool(...) + bool(...))
+
+    model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
     print(" Train balance:", np.bincount(np.array(y_train), minlength=len(CLASSES)))
-    print(" Val balance:   (using train for monitoring) ->", np.bincount(np.array(y_train), minlength=len(CLASSES)))
+    print(" Val balance:  ", np.bincount(np.array(y_val),   minlength=len(CLASSES)))
 
-    # class weights (kept) on same device
     weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
 
-    optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.999))
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5, min_lr=1e-6, verbose=True)
+
     writer = SummaryWriter()
     hist = {'loss_train': [], 'loss_val': [], 'acc_val': [], 'recall_sad': []}
 
@@ -117,9 +127,12 @@ def train():
 
     print("\n Training...")
     for epoch in range(EPOCHS):
-        # --- Train ---
+        # ----- Train -----
         model.train()
-        total_loss = 0.0
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
         for inputs, labels in train_loader:
             inputs = inputs.to(device)
             labels = labels.to(device)
@@ -128,41 +141,51 @@ def train():
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            total_loss += float(loss.item())
-        avg_train_loss = total_loss / max(1, len(train_loader))
 
-        # --- "Validation" pass = evaluate on the training set ---
+            train_loss += float(loss.item())
+            _, predicted = torch.max(outputs.data, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
+
+        avg_train_loss = train_loss / max(1, len(train_loader))
+        train_acc = train_correct / max(1, train_total)
+
+        # ----- Validate -----
         model.eval()
-        all_preds, all_labels = [], []
         val_loss = 0.0
+        all_preds, all_labels = [], []
+
         with torch.no_grad():
             for inputs, labels in val_loader:
                 inputs = inputs.to(device)
                 labels = labels.to(device)
+
                 outputs = model(inputs)
                 loss_val_batch = criterion(outputs, labels)
                 val_loss += float(loss_val_batch.item())
+
                 _, preds = torch.max(outputs, 1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
-        val_loss /= max(1, len(train_loader))
 
+        val_loss /= max(1, len(val_loader))
         np_preds = np.array(all_preds)
         np_labels = np.array(all_labels)
         val_acc = (np_preds == np_labels).mean()
 
-        # metrics (computed on training set)
-        sad = 1
-        tp = int(((np_preds == sad) & (np_labels == sad)).sum())
-        fn = int(((np_preds != sad) & (np_labels == sad)).sum())
+        sad_idx = CLASSES.index('sad')
+        tp = int(((np_preds == sad_idx) & (np_labels == sad_idx)).sum())
+        fn = int(((np_preds != sad_idx) & (np_labels == sad_idx)).sum())
         recall_sad = tp / (tp + fn) if (tp + fn) else 0.0
+
+        from sklearn.metrics import f1_score, confusion_matrix
         f1_macro = f1_score(np_labels, np_preds, average='macro')
         pred_dist = np.bincount(np_preds, minlength=len(CLASSES))
         cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
 
-        # --- Choose monitor metric from config (on training set) ---
+        # Choose monitor metric
         if MONITOR_METRIC == "f1_score_macro":
             monitor_value = f1_macro
         elif MONITOR_METRIC == "recall_sad":
@@ -170,7 +193,6 @@ def train():
         else:
             monitor_value = val_acc
 
-        # keep your existing names
         hist['loss_train'].append(avg_train_loss)
         hist['loss_val'].append(val_loss)
         hist['acc_val'].append(val_acc)
@@ -178,40 +200,51 @@ def train():
 
         scheduler.step(monitor_value)
 
-        # --- TensorBoard scalars ---
         writer.add_scalar('Loss/train', avg_train_loss, epoch)
-        writer.add_scalar('Loss/val', val_loss, epoch)                      # here 'val' == eval on train
+        writer.add_scalar('Loss/val', val_loss, epoch)
+        writer.add_scalar('Accuracy/train', train_acc, epoch)
         writer.add_scalar('Accuracy/val', val_acc, epoch)
+        writer.add_scalar('Recall/sad', recall_sad, epoch)
         writer.add_scalar('F1/macro_val', f1_macro, epoch)
-        writer.add_scalar(f'Monitor Metric/{MONITOR_METRIC}', monitor_value, epoch)
 
-        # --- Confusion matrix image (train-as-val) ---
-        fig_cm = _plot_confusion_matrix(cm, class_names=CLASSES)
+        fig_cm = _plot_confusion_matrix(cm, class_names=CLASSES, title=f'Val CM - Epoch {epoch+1}')
         writer.add_figure('ConfusionMatrix/val', fig_cm, epoch)
         plt.close(fig_cm)
 
         print(
             f"Epoch {epoch+1}/{EPOCHS} | "
-            f"Loss: {total_loss:.4f} | Val Loss: {val_loss:.4f} | "
-            f"Val Acc: {val_acc:.2f} | Val Recall(sad): "
-            f"{(monitor_value if MONITOR_METRIC=='recall_sad' else 0.0):.2f} | "
-            f"F1(macro): {f1_macro:.2f} | PredDist: {pred_dist.tolist()}"
+            f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.3f} | "
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.3f} | "
+            f"Val Recall(sad): {recall_sad:.3f} | "
+            f"F1: {f1_macro:.3f} | Dist: {pred_dist.tolist()}"
         )
 
-        # --- Early stopping / checkpoint on monitor metric (train-as-val) ---
+        # Early stopping + checkpoint
         if monitor_value > best_monitor_metric:
             best_monitor_metric = monitor_value
-            torch.save(model.state_dict(), MODEL_DIR / "best_model.pt")
-            print("Best model saved.")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_metric': best_monitor_metric,
+                'val_acc': val_acc,
+                'recall_sad': recall_sad
+            }, MODEL_DIR / "best_model.pt")
+            print(f"✓ Best model saved (metric: {best_monitor_metric:.3f})")
             patience_counter = 0
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(" Early stopping!")
+                print(f"Early stopping triggered after {epoch+1} epochs.")
                 break
 
+        # Optional: warn for overfitting
+        if epoch > 10 and train_acc - val_acc > 0.15:
+            print(f"Warning: possible overfitting (train {train_acc:.3f} vs val {val_acc:.3f}).")
+
     _plot_training_curves(hist, MODEL_DIR)
-    print(f"Saved plots to: {MODEL_DIR}")
+    print(f"Training complete. Best {MONITOR_METRIC}: {best_monitor_metric:.3f}")
+    print(f"Saved model and plots to: {MODEL_DIR}")
     writer.close()
 
 if __name__ == "__main__":
