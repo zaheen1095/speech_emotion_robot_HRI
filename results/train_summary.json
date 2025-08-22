@@ -1,0 +1,6 @@
+{
+  "best_epoch": 16,
+  "best_metric": 0.8914971820632198,
+  "monitor": "f1_score_macro",
+  "sad_threshold": 0.35
+}

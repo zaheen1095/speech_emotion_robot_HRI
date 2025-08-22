@@ -1,7 +1,7 @@
 # evaluate_testset.py  (neutral, no sad-bias)
 import os, glob
 import torch
-import numpy as np
+import numpy as np, json
 import pandas as pd
 
 from extract_features import extract_mfcc
@@ -49,7 +49,8 @@ model.eval()
 # --- evaluate (pure argmax, no thresholds, no forcing to sad) ---
 conf_argmax = np.zeros((len(CLASSES), len(CLASSES)), dtype=int)
 conf_thr    = np.zeros_like(conf_argmax)
-th_sad = INFERENCE_SETTINGS.get("sad_threshold", 0.45)
+th_sad = INFERENCE_SETTINGS.get("sad_threshold", 0.55)
+print(f"[info] using sad_threshold={th_sad:.2f}")
 per_file = []
 
 with torch.no_grad():
@@ -65,7 +66,8 @@ with torch.no_grad():
         probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
 
         pred_argmax = int(np.argmax(probs))
-        p_sad = float(probs[1])
+        # p_sad = float(probs[1])
+        p_sad = float(probs[CLASSES.index('sad')])
         pred_thr = 1 if p_sad >= th_sad else 0 
 
         conf_argmax[true_idx, pred_argmax] += 1
@@ -106,6 +108,26 @@ def _print_metrics(name, cm):
 _print_metrics("A) ARGMAX", conf_argmax)
 _print_metrics("B) THRESHOLD (p_sad ≥ sad_threshold)", conf_thr)
 
+def sweep_thresholds(val_pairs, model, device):
+    import numpy as np
+    from sklearn.metrics import f1_score
+    ths = np.linspace(0.35, 0.75, 41)
+    y_true, psad = [], []
+    with torch.no_grad():
+        for audio_path, true_idx in val_pairs:
+            x = extract_mfcc(audio_path=audio_path)
+            logits = model(torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device))
+            probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+            y_true.append(true_idx)
+            psad.append(float(probs[CLASSES.index('sad')]))
+    y_true = np.array(y_true)
+    best = (0.0, 0.5)  # (f1_macro, threshold)
+    for th in ths:
+        y_pred = (np.array(psad) >= th).astype(int)  # 1=sad, 0=happy
+        f1m = f1_score(y_true, y_pred, average='macro')
+        if f1m > best[0]:
+            best = (f1m, th)
+    print(f"[sweep] best macro-F1={best[0]:.3f} at sad_threshold={best[1]:.2f}")
 
 # --- save csv ---
 os.makedirs("results", exist_ok=True)

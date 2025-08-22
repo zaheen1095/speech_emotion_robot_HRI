@@ -21,7 +21,7 @@ def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = Non
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
         # --- Trim leading/trailing silence (keeps emotional core tighter) ---
-        y_trim, _ = librosa.effects.trim(y, top_db=200)
+        y_trim, _ = librosa.effects.trim(y, top_db=FEATURE_SETTINGS["trim_db"])
         if y_trim.size >= int(0.25 * sr):   # ≥ 250 ms remains
             y = y_trim
 

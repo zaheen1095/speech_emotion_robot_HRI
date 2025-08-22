@@ -7,17 +7,23 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 import numpy as np
+
+import torch.nn.functional as F
 from pathlib import Path
 from models.cnn_bilstm import CNNBiLSTM
 from config import FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 from sklearn.metrics import f1_score, confusion_matrix
 import matplotlib.pyplot as plt
+from augmentations import spec_augment   # + (optionally later) augment_waveform
 
 # --- Custom Dataset Loader ---
 class FeatureDataset(Dataset):
-    def __init__(self, feature_paths, labels):
+    def __init__(self, feature_paths, labels, split: str = "train", augment: bool = False):
         self.feature_paths = feature_paths
         self.labels = labels
+         # new flags (default keep old behavior if you don't pass them)
+        self.split = split
+        self.augment = augment
 
     def __len__(self):
         return len(self.feature_paths)
@@ -25,6 +31,10 @@ class FeatureDataset(Dataset):
     def __getitem__(self, idx):
         x = np.load(self.feature_paths[idx])
         y = self.labels[idx]
+
+        # train-only SpecAugment (feature-level masks)
+        if self.split == "train" and self.augment:
+            x = spec_augment(x.T, p=0.5).T  # 50% chance; returns same shape as input
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
 # --- Load Training Data WITH validation split ---
@@ -93,13 +103,21 @@ def train():
     print("\n🚀 Loading data with proper validation split...")
     X_train, y_train, X_val, y_val = load_data()
 
-    train_loader = DataLoader(FeatureDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    val_loader   = DataLoader(FeatureDataset(X_val,   y_val),   batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(FeatureDataset(X_train, y_train, augment = True), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    val_loader   = DataLoader(FeatureDataset(X_val,   y_val, split="val",   augment=False),   batch_size=BATCH_SIZE, shuffle=False)
+
+    print(" Augmentation (SpecAugment) on train:", True)
+    print(" Augmentation on val/test:", False)
+
 
     print("\n Initializing model...")
+    # input_dim = FEATURE_SETTINGS['n_mfcc'] * (
+    #     1 + int(FEATURE_SETTINGS.get('use_delta', False)) +
+    #     1 + int(FEATURE_SETTINGS.get('use_delta_delta', False)) - 1  # compact way to add deltas if True
+    # )
     input_dim = FEATURE_SETTINGS['n_mfcc'] * (
         1 + int(FEATURE_SETTINGS.get('use_delta', False)) +
-        1 + int(FEATURE_SETTINGS.get('use_delta_delta', False)) - 1  # compact way to add deltas if True
+        int(FEATURE_SETTINGS.get('use_delta_delta', False))
     )
     # (equivalently) input_dim = FEATURE_SETTINGS['n_mfcc'] * (1 + bool(...) + bool(...))
 
@@ -156,6 +174,7 @@ def train():
         model.eval()
         val_loss = 0.0
         all_preds, all_labels = [], []
+        all_logits = []  # NEW
 
         with torch.no_grad():
             for inputs, labels in val_loader:
@@ -169,6 +188,7 @@ def train():
                 _, preds = torch.max(outputs, 1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
+                all_logits.append(outputs.cpu())  # NEW
 
         val_loss /= max(1, len(val_loader))
         np_preds = np.array(all_preds)
@@ -184,6 +204,22 @@ def train():
         f1_macro = f1_score(np_labels, np_preds, average='macro')
         pred_dist = np.bincount(np_preds, minlength=len(CLASSES))
         cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
+
+        
+
+        logits_val = torch.cat(all_logits, dim=0)          # [N, 2]
+        probs_val = F.softmax(logits_val, dim=1).numpy()   # [N, 2]
+        p_sad = probs_val[:, CLASSES.index('sad')]         # [N]
+
+        # simple grid search; tighten if you like
+        grid = np.linspace(0.35, 0.70, 36)  # 0.35..0.70 step 0.01
+        best_thr, best_f1 = 0.50, -1.0
+        for thr in grid:
+            preds_thr = (p_sad >= thr).astype(int)  # 1=sad, 0=happy (assumes CLASSES=['happy','sad'])
+            f1_thr = f1_score(np_labels, preds_thr, average='macro')
+            if f1_thr > best_f1:
+                best_f1 = f1_thr
+                best_thr = float(thr)
 
         # Choose monitor metric
         if MONITOR_METRIC == "f1_score_macro":
@@ -228,9 +264,10 @@ def train():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_metric': best_monitor_metric,
                 'val_acc': val_acc,
-                'recall_sad': recall_sad
+                'recall_sad': recall_sad,
+                'sad_threshold': best_thr,          # NEW
             }, MODEL_DIR / "best_model.pt")
-            print(f"✓ Best model saved (metric: {best_monitor_metric:.3f})")
+            print(f"✓ Best model saved (metric: {best_monitor_metric:.3f}, sad_thr={best_thr:.2f})")
             patience_counter = 0
         else:
             patience_counter += 1

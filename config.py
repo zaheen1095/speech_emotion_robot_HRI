@@ -20,7 +20,8 @@ FEATURE_SETTINGS = {
     "use_delta": True,
     "use_delta_delta": True,
     "max_len": 313,          # pad/truncate frames
-    "max_duration": 5.0      # seconds to load
+    "max_duration": 5.0,      # seconds to load
+    "trim_db": 40
 }
 
 # === Training Defaults ===

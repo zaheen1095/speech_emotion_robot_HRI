@@ -20,4 +20,5 @@ onnxruntime==1.15.0
 # conda install -c conda-forge onnx onnxruntime protobuf  or  python -m pip install "onnx>=1.14,<1.18" onnxruntime
 # sounddevice
 # pip install tensorboard scikit-learn matplotlib
+#pip install audiomentations
 
