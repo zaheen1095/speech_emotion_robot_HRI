@@ -1,0 +1,9 @@
+{
+  "best_metric": 0.9092276191782432,
+  "monitor": "f1_score_macro",
+  "classes": [
+    "happy",
+    "sad"
+  ],
+  "input_dim": 45
+}

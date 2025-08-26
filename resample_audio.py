@@ -1,30 +1,38 @@
-import os
-import librosa
-import soundfile as sf
-from config import RAW_AUDIO_DIR, RESAMPLED_DIR, FEATURE_SETTINGS
+# resample_audio.py
+import librosa, soundfile as sf
+from pathlib import Path
+from config import AUGMENTED_DIR, RESAMPLED_DIR, FEATURE_SETTINGS
 
-def resample_wav(input_file, output_file):
+TARGET_SR = FEATURE_SETTINGS["sample_rate"]
+
+def resample_file(in_path: Path, out_path: Path):
     try:
-        audio, original_sr = librosa.load(input_file, sr=None)
-        target_sample_rate = FEATURE_SETTINGS['sample_rate']
-        if original_sr != target_sample_rate:
-            audio = librosa.resample(audio, orig_sr=original_sr, target_sr=target_sample_rate)
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        sf.write(output_file, audio, target_sample_rate)
-        print(f"Resampled and saved: {output_file}")
+        y, sr = librosa.load(str(in_path), sr=None, mono=True)
+        if sr != TARGET_SR:
+            y = librosa.resample(y, orig_sr=sr, target_sr=TARGET_SR)
+            sr = TARGET_SR
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(out_path), y, sr)
     except Exception as e:
-        print(f"Error processing {input_file}: {e}")
+        print(f"[skip] {in_path}: {e}")
 
-def process_split(split):
-    for emotion in os.listdir(os.path.join(RAW_AUDIO_DIR, split)):
-        emotion_dir = os.path.join(RAW_AUDIO_DIR, split, emotion)
-        for filename in os.listdir(emotion_dir):
-            input_path = os.path.join(emotion_dir, filename)
-            output_path = os.path.join(RESAMPLED_DIR, split, emotion, filename)
-            resample_wav(input_path, output_path)
+def process_split(split="train"):
+    in_root  = AUGMENTED_DIR / split
+    out_root = RESAMPLED_DIR / split
+
+    wav_exts = (".wav", ".WAV")
+    files = [p for p in in_root.rglob("*") if p.suffix in wav_exts]
+    if not files:
+        print(f"[warn] No WAVs under {in_root} — did you run offline_augmentation.py?")
+        return
+
+    print(f"[info] Resampling {len(files)} files to {TARGET_SR} Hz")
+    for in_path in files:
+        rel = in_path.relative_to(in_root)              # keep tree
+        out_path = out_root / rel
+        resample_file(in_path, out_path)
 
 if __name__ == "__main__":
-    print("Starting resampling process...")
     process_split("train")
-    process_split("test")
-    print("Resampling completed.")
+    process_split("test")   # test has only originals (no aug), still resampled
+    print("[done] Resampled WAVs in datasets/resampled_audio/")

@@ -4,6 +4,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATASET_DIR = BASE_DIR / 'datasets'
 RAW_AUDIO_DIR = DATASET_DIR / 'raw_audio'
+AUGMENTED_DIR   = DATASET_DIR / 'augmented_audio'
 RESAMPLED_DIR = DATASET_DIR / 'resampled_audio'
 FEATURES_DIR = DATASET_DIR / 'features'
 MODEL_DIR = BASE_DIR / 'models'
@@ -37,6 +38,34 @@ LABEL_SMOOTHING = 0.0
 MONITOR_METRIC = "f1_score_macro"       # checkpoint/early-stop on this
 
 INFERENCE_SETTINGS = {
-    "sad_threshold": 0.45,          # prefer 'sad' when P(sad) >= threshold
+    "sad_threshold": 0.40,          # prefer 'sad' when P(sad) >= threshold
     "min_confidence": 0.50          # below this, return "Uncertain"
 }
+AUG_PER_FILE = {"train": 1, "test": 0}               # change '1' to 2/3/etc. if you want more
+AUG_SEED = 1337
+SAD_THRESHOLD_OVERRIDE = None
+
+# === Phase B switches ===
+USE_EXTRA_FEATURES = True          # turn B1 on/off
+USE_ATTENTION = False              # add attention later (B2) if gap persists
+
+# Pitch/energy settings (aligned with MFCC hop/frames)
+PROSODY_SETTINGS = {
+    "f0_method": "yin",            # "yin" or "pyin"
+    "frame_length": 1024,          # keep consistent with FEATURE_SETTINGS n_fft
+    "hop_length": FEATURE_SETTINGS["hop_length"],
+    "fmin_hz": 50,
+    "fmax_hz": 500,
+    "rolloff_percent": 0.85
+}
+
+# Which extra per-frame features to append (order matters)
+EXTRA_FEATURES = [
+    "f0_hz",        # raw F0 (Hz; 0 for unvoiced)
+    "voiced_flag",  # 0/1
+    "rms",          # frame RMS energy
+    "spec_centroid",
+    "spec_bandwidth",
+    "spec_rolloff",
+    # optionally: "spec_flux"
+]

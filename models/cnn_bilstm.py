@@ -2,8 +2,9 @@ import torch.nn as nn
 import torch
 
 class CNNBiLSTM(nn.Module):
-    def __init__(self, input_dim=39, num_classes=2):
+    def __init__(self, input_dim=39, num_classes=2,use_attention=False):
         super().__init__()
+        self.use_attention = use_attention
         
         # Enhanced CNN Block
         self.conv = nn.Sequential(
@@ -49,8 +50,14 @@ class CNNBiLSTM(nn.Module):
         lstm_out, _ = self.lstm(x)  # (batch, time, 2*hidden)
         
         # Attention
-        attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
-        context = torch.sum(attn_weights * lstm_out, dim=1)
+         # ... conv -> lstm_out (B, T, 256)
+        if self.use_attention:
+            attn_weights = torch.softmax(self.attention(lstm_out), dim=1)  # (B, T, 1)
+            context = torch.sum(attn_weights * lstm_out, dim=1)                   # (B, 256)
+        else:
+            context = torch.mean(lstm_out, dim=1)       # (B, 256) mean-pool
+        # attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
+        # context = torch.sum(attn_weights * lstm_out, dim=1)
         
         # Classification
         return self.fc(context)
