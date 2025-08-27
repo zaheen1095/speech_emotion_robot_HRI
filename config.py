@@ -47,7 +47,7 @@ SAD_THRESHOLD_OVERRIDE = None
 
 # === Phase B switches ===
 USE_EXTRA_FEATURES = True          # turn B1 on/off
-USE_ATTENTION = False              # add attention later (B2) if gap persists
+USE_ATTENTION = True              # add attention later (B2) if gap persists
 
 # Pitch/energy settings (aligned with MFCC hop/frames)
 PROSODY_SETTINGS = {
@@ -61,11 +61,23 @@ PROSODY_SETTINGS = {
 
 # Which extra per-frame features to append (order matters)
 EXTRA_FEATURES = [
-    "f0_hz",        # raw F0 (Hz; 0 for unvoiced)
-    "voiced_flag",  # 0/1
-    "rms",          # frame RMS energy
-    "spec_centroid",
-    "spec_bandwidth",
-    "spec_rolloff",
-    # optionally: "spec_flux"
+    "f0_hz", "voiced_flag", "rms",
+    "spec_centroid", "spec_bandwidth", "spec_rolloff"
+   
 ]
+# -------- Phase B3: eval-time augmentation (val/test) --------
+USE_AUG_ON_VAL_TEST = True          # <— turn ON
+VAL_TEST_AUG_PROB   = 0.50          # 50% of files get one augmentation
+VAL_TEST_AUG_CHAIN  = False         # if True, can apply more than one
+
+# individual op probs (used only if selected)
+VAL_TEST_NOISE_PROB = 0.60
+VAL_TEST_PITCH_PROB = 0.35
+VAL_TEST_TIME_PROB  = 0.35
+VAL_TEST_REVERB_PROB= 0.35
+
+# parameter ranges
+VAL_TEST_NOISE_SNR_DB = [0, 5, 10]     # pick one at random
+VAL_TEST_PITCH_STEPS  = [-2, -1, 1, 2] # semitones
+VAL_TEST_TIME_RANGE   = [0.90, 1.10]   # time stretch
+VAL_TEST_IR_PRESET    = "small_room"   # if you support a convolution reverb

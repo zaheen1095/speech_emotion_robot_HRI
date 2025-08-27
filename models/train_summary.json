@@ -1,9 +1,21 @@
 {
-  "best_metric": 0.9092276191782432,
+  "best_metric": 0.8732083846739878,
   "monitor": "f1_score_macro",
   "classes": [
     "happy",
     "sad"
   ],
-  "input_dim": 45
+  "input_dim": 45,
+  "used_attention": true,
+  "used_extra_features": true,
+  "extra_features": [
+    "f0_hz",
+    "voiced_flag",
+    "rms",
+    "spec_centroid",
+    "spec_bandwidth",
+    "spec_rolloff"
+  ],
+  "use_focal_loss": false,
+  "focal_gamma": null
 }

@@ -56,8 +56,6 @@ class CNNBiLSTM(nn.Module):
             context = torch.sum(attn_weights * lstm_out, dim=1)                   # (B, 256)
         else:
             context = torch.mean(lstm_out, dim=1)       # (B, 256) mean-pool
-        # attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
-        # context = torch.sum(attn_weights * lstm_out, dim=1)
-        
+
         # Classification
         return self.fc(context)

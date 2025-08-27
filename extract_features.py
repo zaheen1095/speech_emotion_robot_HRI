@@ -163,6 +163,84 @@ def _compute_prosody_TF(y, sr, T_target):
         F = F[:, :T_target]
     return F.T  # -> (T_target, num_extra)
 
+# ---- Phase B1: extra per-frame features (pitch/energy/spectral) ----
+def _safe_len_align(A, B, axis=0):
+    """Pad/truncate B to match A along axis."""
+    import numpy as np
+    if A.shape[axis] == B.shape[axis]:
+        return B
+    T = A.shape[axis]
+    if B.shape[axis] > T:
+        slicer = [slice(None)] * B.ndim
+        slicer[axis] = slice(0, T)
+        return B[tuple(slicer)]
+    # pad
+    pad_width = [(0,0)] * B.ndim
+    pad_width[axis] = (0, T - B.shape[axis])
+    return np.pad(B, pad_width, mode='edge')
+
+def _zscore_per_dim(X, eps=1e-8):
+    mu = X.mean(axis=0, keepdims=True)
+    sd = X.std(axis=0, keepdims=True)
+    return (X - mu) / (sd + eps)
+
+def _framewise_extras(y, sr, hop_length, n_fft):
+    import numpy as np
+    import librosa
+
+    # Framewise RMS energy
+    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop_length)  # [1, T]
+    rms = rms.T  # [T, 1]
+
+    # Spectral features (all framewise, shape [T, 1] each)
+    spec_centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length).T
+    spec_bw       = librosa.feature.spectral_bandwidth(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length).T
+    spec_rolloff  = librosa.feature.spectral_rolloff(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length, roll_percent=0.85).T
+
+    # Spectral flux: L2 diff between consecutive normalized magnitude spectra
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))  # [F, T]
+    S = S / (S.sum(axis=0, keepdims=True) + 1e-8)
+    flux = np.sqrt(((np.diff(S, axis=1))**2).sum(axis=0, keepdims=True))  # [1, T-1]
+    flux = np.concatenate([flux[:, :1], flux], axis=1).T  # [T, 1], pad first frame
+
+    # Pitch contour using librosa.pyin (robust, returns Hz + unvoiced as nan)
+    f0, _, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'),
+                             frame_length=n_fft, hop_length=hop_length, sr=sr)
+    # f0: [T] in Hz with NaNs for unvoiced → replace NaN by 0, keep a voiced mask
+    f0_hz = np.nan_to_num(f0, nan=0.0)[:, None]  # [T,1]
+    vuv   = (~np.isnan(f0)).astype(np.float32)[:, None]  # [T,1] voiced=1, unvoiced=0
+
+    # Stack per-frame extras: [T, D_extra]
+    extras = np.concatenate([rms, spec_centroid, spec_bw, spec_rolloff, flux, f0_hz, vuv], axis=1)
+    return extras  # [T, 7]
+
+def _concat_extras_per_frame(mfcc_stack, y, sr, hop_length, n_fft,
+                             use_pitch=True, use_energy=True, use_spectral=True):
+    """
+    mfcc_stack: [T, D_mfcc]  (your current MFCC(+Δ,+ΔΔ) already stacked over D)
+    returns:   [T, D_mfcc + D_extra]
+    """
+    import numpy as np
+    D_extra = 0
+    pieces = [mfcc_stack]
+
+    if use_pitch or use_energy or use_spectral:
+        extras = _framewise_extras(y, sr, hop_length, n_fft)  # [T_e, 7]
+        # Option mask by groups
+        idxs = []
+        if use_energy:   idxs += [0]         # rms
+        if use_spectral: idxs += [1,2,3,4]   # centroid, bw, rolloff, flux
+        if use_pitch:    idxs += [5,6]       # f0_hz, vuv
+        if idxs:
+            extras = extras[:, idxs]         # [T_e, D_sel]
+            extras = _safe_len_align(mfcc_stack, extras, axis=0)
+            pieces.append(extras)
+            D_extra = extras.shape[1]
+
+    out = np.concatenate(pieces, axis=1)     # [T, D_mfcc + D_extra]
+    return out, D_extra
+
+
 if __name__ == "__main__":
     process_audio_files("train")
     process_audio_files("test")

@@ -20,7 +20,7 @@ from config import (
     FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, USE_ATTENTION, USE_EXTRA_FEATURES, EXTRA_FEATURES,
     BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
 )
-from augmentations import spec_augment  # feature-level masks
+from augmentations import spec_augment
 
 # -------------------------
 # Reproducibility
@@ -56,6 +56,28 @@ class FeatureDataset(Dataset):
         if self.split == "train" and self.augment:
             x = spec_augment(x.T, p=0.5).T  # keep (T, D)
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
+
+# ---- Optional Focal Loss (B3) ----
+class FocalLoss(nn.Module):
+    def __init__(self, weight=None, gamma=2.0, reduction='mean', label_smoothing=0.0):
+        super().__init__()
+        self.weight = weight
+        self.gamma = gamma
+        self.reduction = reduction
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits, targets):
+        # cross-entropy with optional label smoothing
+        ce = F.cross_entropy(logits, targets, weight=self.weight, reduction='none',
+                             label_smoothing=self.label_smoothing)
+        # convert CE to pt = exp(-CE)
+        pt = torch.exp(-ce)
+        focal = (1 - pt) ** self.gamma * ce
+        if self.reduction == 'mean':
+            return focal.mean()
+        elif self.reduction == 'sum':
+            return focal.sum()
+        return focal
 
 # -------------------------
 # Utilities
@@ -186,6 +208,14 @@ def train():
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5, min_lr=1e-6, verbose=True)
 
+    USE_FOCAL = os.environ.get("USE_FOCAL_LOSS", "0") == "1"   # opt-in via env var
+    FOCAL_GAMMA = float(os.environ.get("FOCAL_GAMMA", "2.0"))
+
+    if USE_FOCAL:
+        criterion = FocalLoss(weight=weights, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHING)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
+
     writer = SummaryWriter()
     hist = {'loss_train': [], 'loss_val': [], 'acc_val': [], 'recall_sad': []}
 
@@ -249,12 +279,15 @@ def train():
         np_preds = np.array(all_preds, dtype=int)
         np_labels = np.array(all_labels, dtype=int)
         val_acc = (np_preds == np_labels).mean()
-
+        f1_macro = f1_score(np_labels, np_preds, average='macro')
         tp = int(((np_preds == sad_idx) & (np_labels == sad_idx)).sum())
         fn = int(((np_preds != sad_idx) & (np_labels == sad_idx)).sum())
         recall_sad = tp / (tp + fn) if (tp + fn) else 0.0
 
-        f1_macro = f1_score(np_labels, np_preds, average='macro')
+        # f1_macro = f1_score(np_labels, np_preds, average='macro')
+        f1_per_class = f1_score(np_labels, np_preds, labels=[happy_idx, sad_idx], average=None, zero_division=0)
+        f1_happy, f1_sad = float(f1_per_class[0]), float(f1_per_class[1])
+        f1_gap = abs(f1_happy - f1_sad)
         pred_dist = np.bincount(np_preds, minlength=len(CLASSES))
         cm = confusion_matrix(np_labels, np_preds, labels=list(range(len(CLASSES))))
 
@@ -293,7 +326,9 @@ def train():
         writer.add_scalar('Accuracy/val', val_acc, epoch)
         writer.add_scalar('Recall/sad', recall_sad, epoch)
         writer.add_scalar('F1/macro_val', f1_macro, epoch)
-
+        writer.add_scalar('F1/happy_val', f1_happy, epoch)
+        writer.add_scalar('F1/sad_val', f1_sad, epoch)
+        writer.add_scalar('F1/gap_val', f1_gap, epoch)
         fig_cm = _plot_confusion_matrix(cm, class_names=CLASSES, title=f'Val CM - Epoch {epoch+1}')
         writer.add_figure('ConfusionMatrix/val', fig_cm, epoch)
         plt.close(fig_cm)
@@ -303,8 +338,10 @@ def train():
             f"Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.3f} | "
             f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.3f} | "
             f"Val Recall(sad): {recall_sad:.3f} | "
-            f"F1: {f1_macro:.3f} | Dist: {pred_dist.tolist()} | Thr*={best_thr:.2f}"
+            f"F1: {f1_macro:.3f} | Dist: {pred_dist.tolist()} | Thr*={best_thr:.2f} | "
+            f"F1_gap={f1_gap:.3f}"
         )
+
 
         # Early stopping + checkpoint
         if monitor_value > best_monitor_metric:
@@ -318,6 +355,11 @@ def train():
                 'recall_sad': recall_sad,
                 'sad_threshold': best_thr,
             }, Path(MODEL_DIR) / "best_model.pt")
+             # persist a PNG of the best CM
+            fig_best = _plot_confusion_matrix(cm, class_names=CLASSES, title=f'Best Val CM (epoch {epoch+1})')
+            Path(MODEL_DIR).mkdir(parents=True, exist_ok=True)
+            fig_best.savefig(Path(MODEL_DIR) / "best_val_cm.png", dpi=140, bbox_inches='tight')
+            plt.close(fig_best)
             print(f"✓ Best model saved (metric: {best_monitor_metric:.3f}, sad_thr={best_thr:.2f})")
             patience_counter = 0
         else:
@@ -337,7 +379,11 @@ def train():
         "monitor": MONITOR_METRIC,
         "classes": CLASSES,
         "input_dim": int(input_dim),
-        
+        "used_attention": bool(USE_ATTENTION),
+        "used_extra_features": bool(USE_EXTRA_FEATURES),
+        "extra_features": EXTRA_FEATURES,
+        "use_focal_loss": bool(USE_FOCAL),
+        "focal_gamma": float(FOCAL_GAMMA) if USE_FOCAL else None,
     }
     with open(Path(MODEL_DIR) / "train_summary.json", "w") as f:
         json.dump(summary, f, indent=2)

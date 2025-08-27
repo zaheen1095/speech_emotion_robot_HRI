@@ -1,5 +1,16 @@
 # augmentations.py
 import numpy as np
+import random
+import librosa
+from audiomentations import (
+    Compose, AddGaussianNoise, Gain, PitchShift, TimeStretch,
+    BandPassFilter, ClippingDistortion, Shift
+)
+from config import (
+    USE_AUG_ON_VAL_TEST, VAL_TEST_AUG_PROB, VAL_TEST_AUG_CHAIN,
+    VAL_TEST_NOISE_PROB, VAL_TEST_PITCH_PROB, VAL_TEST_TIME_PROB, VAL_TEST_REVERB_PROB,
+    VAL_TEST_NOISE_SNR_DB, VAL_TEST_PITCH_STEPS, VAL_TEST_TIME_RANGE, VAL_TEST_IR_PRESET
+)
 
 # --------- Feature-level (SpecAugment-style) ---------
 def spec_augment(
@@ -50,11 +61,6 @@ def spec_augment(
 # --------- Waveform-level (optional, train-only) ---------
 # Will use audiomentations if available; otherwise, fall back to no-op.
 try:
-    from audiomentations import (
-        Compose, AddGaussianNoise, Gain, PitchShift, TimeStretch,
-        BandPassFilter, ClippingDistortion, Shift
-    )
-
     def build_wave_augmenter(sample_rate: int):
         return Compose([
             AddGaussianNoise(min_amplitude=0.0005, max_amplitude=0.01, p=0.35),
@@ -71,6 +77,69 @@ try:
             augmenter = build_wave_augmenter(sr)
         return augmenter(samples=y.astype(np.float32), sample_rate=sr).astype(np.float32)
 
+    def maybe_augment_eval(y, sr):
+        """
+        Apply at most one eval-time augmentation with probability VAL_TEST_AUG_PROB,
+        unless VAL_TEST_AUG_CHAIN=True (then may apply multiple).
+        """
+        if not USE_AUG_ON_VAL_TEST:
+            return y
+
+        # decide if we augment this file at all
+        if random.random() > VAL_TEST_AUG_PROB:
+            return y
+
+        def add_noise(yy):
+            snr = random.choice(VAL_TEST_NOISE_SNR_DB)
+            # simple white-noise SNR mixer
+            sig_p = np.mean(yy**2) + 1e-12
+            noise = np.random.randn(len(yy))
+            noise = noise / (np.sqrt(np.mean(noise**2)) + 1e-12)
+            noise = noise * np.sqrt(sig_p / (10**(snr/10)))
+            return (yy + noise).astype(np.float32)
+
+        def pitch_shift(yy):
+            st = random.choice(VAL_TEST_PITCH_STEPS)
+            return librosa.effects.pitch_shift(yy, sr=sr, n_steps=st)
+
+        def time_stretch(yy):
+            rate = random.uniform(VAL_TEST_TIME_RANGE[0], VAL_TEST_TIME_RANGE[1])
+            return librosa.effects.time_stretch(yy, rate=rate)
+
+        def reverb(yy):
+            # lightweight Schroeder-style or your existing IRS if you already have one.
+            # If you already implemented IR convolution elsewhere, call it here.
+            # Fallback: tiny echo
+            d = int(0.03 * sr)
+            out = yy.copy()
+            if d < len(yy):
+                out[d:] += 0.3 * yy[:-d]
+            return out.astype(np.float32)
+
+        ops = []
+        if VAL_TEST_NOISE_PROB  > 0: ops += [("noise",  VAL_TEST_NOISE_PROB,  add_noise)]
+        if VAL_TEST_PITCH_PROB  > 0: ops += [("pitch",  VAL_TEST_PITCH_PROB,  pitch_shift)]
+        if VAL_TEST_TIME_PROB   > 0: ops += [("time",   VAL_TEST_TIME_PROB,   time_stretch)]
+        if VAL_TEST_REVERB_PROB > 0: ops += [("reverb", VAL_TEST_REVERB_PROB, reverb)]
+
+        if not VAL_TEST_AUG_CHAIN:
+            # pick a single op by weighted probability
+            total_p = sum(p for _, p, _ in ops)
+            r = random.uniform(0, total_p)
+            c = 0
+            for _, p, fn in ops:
+                c += p
+                if r <= c:
+                    return fn(y)
+            return y
+        else:
+            # possibly apply multiple, each by its own probability
+            yy = y
+            for _, p, fn in ops:
+                if random.random() < p:
+                    yy = fn(yy)
+            return yy
+    
 except Exception:
     # Fallback: no-op if audiomentations is not installed
     def build_wave_augmenter(sample_rate: int):
