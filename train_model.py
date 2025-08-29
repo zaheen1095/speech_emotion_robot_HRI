@@ -10,7 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import f1_score, confusion_matrix
-from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
@@ -18,10 +17,10 @@ from sklearn.model_selection import GroupShuffleSplit
 from models.cnn_bilstm import CNNBiLSTM
 from config import (
     FEATURES_DIR, CLASSES, FEATURE_SETTINGS, MODEL_DIR, USE_ATTENTION, USE_EXTRA_FEATURES, EXTRA_FEATURES,
-    BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING
+    BATCH_SIZE, CLASS_WEIGHTS, MONITOR_METRIC, LABEL_SMOOTHING, DATASET_PREFIXES, TRAIN_DATASETS, HELDOUT_DATASETS
 )
 from augmentations import spec_augment
-
+import argparse
 # -------------------------
 # Reproducibility
 # -------------------------
@@ -133,8 +132,22 @@ def _is_augmented_file(path_str: str) -> bool:
     name = os.path.basename(path_str).lower()
     return any(tok in name for tok in AUG_TOKENS)
 
-def load_data():
-    X_all, y_all, groups = [], [], []
+def infer_corpus_from_filename(path_str: str) -> str:
+    """Map filename prefix to a canonical dataset name using DATASET_PREFIXES."""
+    base = os.path.basename(path_str).lower()
+    # match start-of-name up to first '_' (e.g., 'crema_', 'ravdess_', 'tess_', 'savee_', 'jl_')
+    key = base.split("_", 1)[0]
+    return DATASET_PREFIXES.get(key, "UNKNOWN")
+
+
+def load_data(allowed_train_corpora=None, heldout_corpora=None):
+    # phase B4
+    if allowed_train_corpora is None:
+        allowed_train_corpora = TRAIN_DATASETS
+    if heldout_corpora is None:
+        heldout_corpora = HELDOUT_DATASETS
+
+    X_all, y_all, groups , corpora = [], [], [], [] 
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'train' / emotion
         if not emotion_dir.exists():
@@ -142,25 +155,39 @@ def load_data():
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
                 p = str(emotion_dir / file)
+                corpus = infer_corpus_from_filename(p)   # phase B4
                 X_all.append(p)
                 y_all.append(idx)
                 # group key = basename without any "__aug-..." suffix
                 base = Path(file).stem
                 group_key = base.split("__aug-")[0]
                 groups.append(f"{emotion}/{group_key}")  # include class to be safe
+                corpora.append(corpus)  # phase B4
 
     if not X_all:
         raise SystemExit(f"No .npy features found under {FEATURES_DIR}/train/<{','.join(CLASSES)}>")
+    
+     # keep only items from requested (non-heldout) corpora for train/val
+    keep = [i for i, c in enumerate(corpora) if c in allowed_train_corpora and c not in (heldout_corpora or [])]
+    X_all_tr = [X_all[i] for i in keep]
+    y_all_tr = [y_all[i] for i in keep]
+    groups_tr = [groups[i] for i in keep]
 
     gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
-    train_idx, val_idx = next(gss.split(X_all, y_all, groups))
+    # train_idx, val_idx = next(gss.split(X_all, y_all, groups))
+    train_idx, val_idx = next(gss.split(X_all_tr, y_all_tr, groups_tr))
 
-    X_train = [X_all[i] for i in train_idx]
-    y_train = [y_all[i] for i in train_idx]
+    # X_train = [X_all[i] for i in train_idx]
+    # y_train = [y_all[i] for i in train_idx]
+    X_train = [X_all_tr[i] for i in train_idx]
+    y_train = [y_all_tr[i] for i in train_idx]
       # val: keep originals only (drop augs)
-    X_val = [X_all[i] for i in val_idx if not _is_augmented_file(X_all[i])]
-    y_val = [y_all[i] for i in val_idx if not _is_augmented_file(X_all[i])]
-
+    # X_val = [X_all[i] for i in val_idx if not _is_augmented_file(X_all[i])]
+    # y_val = [y_all[i] for i in val_idx if not _is_augmented_file(X_all[i])]
+    X_val_all = [X_all_tr[i] for i in val_idx]
+    y_val_all = [y_all_tr[i] for i in val_idx]
+    X_val = [p for p in X_val_all if not _is_augmented_file(p)]
+    y_val = [y_val_all[i] for i, p in enumerate(X_val_all) if not _is_augmented_file(p)]
 
     # (optional) sanity print:
     # print("Unique groups in TRAIN:", len(set([groups[i] for i in train_idx])))
@@ -173,7 +200,13 @@ def load_data():
 # -------------------------
 def train():
     print("\n🚀 Loading data with clean validation (no augmented items in val)...")
-    X_train, y_train, X_val, y_val = load_data()
+    # X_train, y_train, X_val, y_val = load_data()
+    X_train, y_train, X_val, y_val = load_data(allowed_train_corpora=TRAIN_DATASETS,
+                                           heldout_corpora=HELDOUT_DATASETS)
+
+    aug_count = sum(1 for p in X_train if "__aug-" in Path(p).stem or ".aug" in p or "_aug" in p or "-aug" in p)
+    print(f"[debug] Train files: {len(X_train)} | Augmented in train: {aug_count} ({aug_count/len(X_train):.1%})")
+    print("Sample train files:", *X_train[:5], sep="\n  ")
 
     train_loader = DataLoader(
         FeatureDataset(X_train, y_train, split="train", augment=True),
@@ -393,4 +426,17 @@ def train():
     writer.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train_datasets", type=str, default=",".join(TRAIN_DATASETS),
+                        help="Comma-separated list (e.g. IEMOCAP,CREMA-D,JL,RAVDESS,SAVEE,TESS)")
+    parser.add_argument("--heldout_datasets", type=str, default=",".join(HELDOUT_DATASETS),
+                        help="Comma-separated list (leave empty for none)")
+    args = parser.parse_args()
+
+    chosen_train = [s.strip() for s in args.train_datasets.split(",") if s.strip()]
+    chosen_heldout = [s.strip() for s in args.heldout_datasets.split(",") if s.strip()]
+    print(f"\nCross-domain setup → Train on: {chosen_train} | Held-out: {chosen_heldout}")
+
+    TRAIN_DATASETS[:] = chosen_train
+    HELDOUT_DATASETS[:] = chosen_heldout
     train()

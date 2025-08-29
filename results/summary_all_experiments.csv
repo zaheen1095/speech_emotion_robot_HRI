@@ -1,0 +1,15 @@
+experiment,mode,accuracy,f1_macro
+B4_holdout_CREMA,argmax,0.668,0.6296
+B4_holdout_CREMA,thresholded,0.668,0.6296
+B4_holdout_CREMAD,argmax,0.7555,0.7553
+B4_holdout_CREMAD,thresholded,0.7634,0.7633
+B4_holdout_IEMOCAP,argmax,0.7682,0.7681
+B4_holdout_IEMOCAP,thresholded,0.7727,0.7723
+B4_holdout_JL,argmax,0.9,0.8999
+B4_holdout_JL,thresholded,0.9,0.8997
+B4_holdout_RAVDESS,argmax,0.6625,0.6191
+B4_holdout_RAVDESS,thresholded,0.65,0.6011
+B4_holdout_SAVEE,argmax,0.5667,0.4994
+B4_holdout_SAVEE,thresholded,0.6,0.5238
+B4_holdout_TESS,argmax,0.9825,0.9825
+B4_holdout_TESS,thresholded,0.9825,0.9825

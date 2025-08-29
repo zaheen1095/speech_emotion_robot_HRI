@@ -4,8 +4,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATASET_DIR = BASE_DIR / 'datasets'
 RAW_AUDIO_DIR = DATASET_DIR / 'raw_audio'
-AUGMENTED_DIR   = DATASET_DIR / 'augmented_audio'
 RESAMPLED_DIR = DATASET_DIR / 'resampled_audio'
+AUGMENTED_DIR   = DATASET_DIR / 'augmented_audio'
+
 FEATURES_DIR = DATASET_DIR / 'features'
 MODEL_DIR = BASE_DIR / 'models'
 
@@ -81,3 +82,25 @@ VAL_TEST_NOISE_SNR_DB = [0, 5, 10]     # pick one at random
 VAL_TEST_PITCH_STEPS  = [-2, -1, 1, 2] # semitones
 VAL_TEST_TIME_RANGE   = [0.90, 1.10]   # time stretch
 VAL_TEST_IR_PRESET    = "small_room"   # if you support a convolution reverb
+
+DATASET_PREFIXES = {
+    "crema": "CREMA-D","cremad": "CREMA-D",  "CREMAD": "CREMA-D",
+    "CREMA":  "CREMA-D",
+    "ravdess": "RAVDESS",
+    "tess": "TESS",
+    "savee": "SAVEE",
+    "jl": "JL",
+    "iemocap": "IEMOCAP",
+    "jlcorpus": "JL",
+    "jl-corpus": "JL",
+    "JLCORPUS" : "JL",
+    "iemocap": "IEMOCAP",
+    "creamad": "CREMA-D",
+}
+
+# Defaults (overridable by CLI)
+TRAIN_DATASETS = ["IEMOCAP", "CREMA-D", "JL", "RAVDESS", "SAVEE", "TESS"]
+# config.py  (add near TRAIN_DATASETS / HELDOUT_DATASETS)
+DEFAULT_TEST_DATASETS = ["CREMA-D", "IEMOCAP", "JL", "RAVDESS", "TESS"]
+
+HELDOUT_DATASETS = [] 

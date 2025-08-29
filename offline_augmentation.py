@@ -5,7 +5,7 @@ import librosa
 import numpy as np
 import soundfile as sf
 
-from config import RAW_AUDIO_DIR, AUGMENTED_DIR
+from config import RAW_AUDIO_DIR, AUGMENTED_DIR, RESAMPLED_DIR
 
 # --------- basic, safe augmentations ----------
 def add_noise(y, snr_db=15):
@@ -82,7 +82,8 @@ def _augment_file(in_path: Path, out_root: Path, rel: Path):
             _write_audio(out_path, y_aug, sr)
 
 def process_split(split="train"):
-    in_root  = RAW_AUDIO_DIR / split
+    # in_root  = RAW_AUDIO_DIR / split
+    in_root = RESAMPLED_DIR / split
     out_root = AUGMENTED_DIR / split
 
     wav_exts = (".wav", ".WAV")

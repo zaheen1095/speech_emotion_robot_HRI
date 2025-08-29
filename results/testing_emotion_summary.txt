@@ -1,25 +1,25 @@
-Sad threshold used: 0.520
+Sad threshold used: 0.660
 
 [ARGMAX]
               precision    recall  f1-score   support
 
-       happy     0.8992    0.6307    0.7414       566
-         sad     0.7160    0.9295    0.8089       567
+       happy     0.8889    0.8521    0.8701       676
+         sad     0.8582    0.8936    0.8755       677
 
-    accuracy                         0.7802      1133
-   macro avg     0.8076    0.7801    0.7752      1133
-weighted avg     0.8076    0.7802    0.7752      1133
+    accuracy                         0.8729      1353
+   macro avg     0.8735    0.8729    0.8728      1353
+weighted avg     0.8735    0.8729    0.8728      1353
 
-Accuracy: 0.7802  Macro-F1: 0.7752
+Accuracy: 0.8729  Macro-F1: 0.8728
 
 [THRESHOLDED]
               precision    recall  f1-score   support
 
-       happy     0.8941    0.6413    0.7469       566
-         sad     0.7208    0.9242    0.8099       567
+       happy     0.8546    0.9127    0.8827       676
+         sad     0.9065    0.8449    0.8746       677
 
-    accuracy                         0.7829      1133
-   macro avg     0.8074    0.7828    0.7784      1133
-weighted avg     0.8074    0.7829    0.7784      1133
+    accuracy                         0.8788      1353
+   macro avg     0.8805    0.8788    0.8787      1353
+weighted avg     0.8806    0.8788    0.8787      1353
 
-Accuracy: 0.7829  Macro-F1: 0.7784
+Accuracy: 0.8788  Macro-F1: 0.8787

@@ -1,7 +1,7 @@
 # resample_audio.py
 import librosa, soundfile as sf
 from pathlib import Path
-from config import AUGMENTED_DIR, RESAMPLED_DIR, FEATURE_SETTINGS
+from config import AUGMENTED_DIR, RESAMPLED_DIR, FEATURE_SETTINGS, RAW_AUDIO_DIR
 
 TARGET_SR = FEATURE_SETTINGS["sample_rate"]
 
@@ -17,13 +17,14 @@ def resample_file(in_path: Path, out_path: Path):
         print(f"[skip] {in_path}: {e}")
 
 def process_split(split="train"):
-    in_root  = AUGMENTED_DIR / split
+    # in_root  = AUGMENTED_DIR / split
+    in_root = RAW_AUDIO_DIR / split
     out_root = RESAMPLED_DIR / split
-
+    
     wav_exts = (".wav", ".WAV")
     files = [p for p in in_root.rglob("*") if p.suffix in wav_exts]
     if not files:
-        print(f"[warn] No WAVs under {in_root} — did you run offline_augmentation.py?")
+        print(f"[warn] No WAVs under {in_root} — put your original audio there.?")
         return
 
     print(f"[info] Resampling {len(files)} files to {TARGET_SR} Hz")

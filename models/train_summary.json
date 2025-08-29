@@ -1,5 +1,5 @@
 {
-  "best_metric": 0.8732083846739878,
+  "best_metric": 0.885938674397558,
   "monitor": "f1_score_macro",
   "classes": [
     "happy",

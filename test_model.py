@@ -1,5 +1,6 @@
 # test_model.py
 import os
+import argparse
 from pathlib import Path
 import numpy as np
 import torch
@@ -13,7 +14,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from models.cnn_bilstm import CNNBiLSTM
-from config import FEATURES_DIR, CLASSES, MODEL_DIR, BATCH_SIZE, FEATURE_SETTINGS, USE_ATTENTION
+from config import (
+    FEATURES_DIR, CLASSES, MODEL_DIR, BATCH_SIZE, FEATURE_SETTINGS,
+    USE_ATTENTION, DATASET_PREFIXES, DEFAULT_TEST_DATASETS
+)
 
 # -------------------------
 # Dataset
@@ -31,16 +35,15 @@ class FeatureDataset(Dataset):
         y = self.labels[idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
+def infer_corpus_from_filename(path_str: str) -> str:
+    base = os.path.basename(path_str).lower()
+    key = base.split("_", 1)[0]
+    return DATASET_PREFIXES.get(key, "UNKNOWN")
+
 # -------------------------
 # Helpers
 # -------------------------
-def _compute_input_dim():
-    return FEATURE_SETTINGS['n_mfcc'] * (
-        1 + int(FEATURE_SETTINGS.get('use_delta', False)) +
-        int(FEATURE_SETTINGS.get('use_delta_delta', False))
-    )
-
-def load_test_data():
+def load_test_data(selected_corpora):
     X, y = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'test' / emotion
@@ -48,11 +51,15 @@ def load_test_data():
             continue
         for file in os.listdir(emotion_dir):
             if file.endswith(".npy"):
-                X.append(str(emotion_dir / file))
-                y.append(idx)
+                full = str(emotion_dir / file)
+                corpus = infer_corpus_from_filename(full)
+                if corpus in selected_corpora:              # <-- filter here
+                    X.append(full)
+                    y.append(idx)
+
     if not X:
         raise SystemExit(
-            f"No test features found under {FEATURES_DIR}/test/<{','.join(CLASSES)}> (.npy)"
+            f"No test features found for {selected_corpora} under {FEATURES_DIR}/test/<{','.join(CLASSES)}> (.npy)"
         )
     return X, y
 
@@ -70,24 +77,29 @@ def _save_confmat(cm, labels, out_path, title):
 # -------------------------
 # Main test
 # -------------------------
-def test():
-    print("\n?? Loading test data...")
-    X_test, y_test = load_test_data()
+def test(checkpoint_path=None, test_datasets=None):
+    # Default to your requested set if not provided
+    selected = test_datasets or DEFAULT_TEST_DATASETS
+    print(f"\nEvaluating only on: {selected}")
+
+    print("\n🔎 Loading test data...")
+    X_test, y_test = load_test_data(selected)
     test_loader = DataLoader(
         FeatureDataset(X_test, y_test),
         batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True
     )
+
     with torch.no_grad():
         sample_x, _ = next(iter(test_loader))
     input_dim = sample_x.shape[-1]
-
     print(f"Inferred input_dim from test features: {input_dim}")
-    print("\n?? Loading trained model...")
-    # input_dim = _compute_input_dim()
-    model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES),use_attention=USE_ATTENTION)
+
+    # ----- Model -----
+    print("\n🧠 Loading trained model...")
+    model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES), use_attention=USE_ATTENTION)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt_path = Path(MODEL_DIR) / "best_model.pt"
+    ckpt_path = Path(checkpoint_path or (Path(MODEL_DIR) / "best_model.pt"))
     if not ckpt_path.exists():
         raise SystemExit(f"Checkpoint not found: {ckpt_path}")
 
@@ -111,10 +123,9 @@ def test():
         sad_idx = CLASSES.index('sad')
     except ValueError:
         raise SystemExit("Class 'sad' not found in CLASSES; thresholded report requires a 'sad' class.")
-    # if you ever change class names, adjust here
     happy_idx = CLASSES.index('happy') if 'happy' in CLASSES else (1 - sad_idx)
 
-    print("\n?? Running inference on test set...")
+    print("\n🚀 Running inference on test set...")
     y_true, y_pred_argmax = [], []
     all_logits = []
 
@@ -122,7 +133,6 @@ def test():
         for inputs, labels in test_loader:
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-
             logits = model(inputs)              # [B, C]
             preds = logits.argmax(dim=1)        # argmax
             y_true.extend(labels.cpu().tolist())
@@ -148,8 +158,8 @@ def test():
     print(f"F1 Score (Macro): {f1_macro:.4f}")
     print(f"F1 Score (Weighted): {f1_weighted:.4f}")
 
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
+    results_dir = Path(args.results_dir or "results")
+    results_dir.mkdir(exist_ok=True, parents=True)
     with open(results_dir / "classification_report_argmax.txt", "w") as f:
         f.write(report)
         f.write(f"\n\nOverall Accuracy: {acc:.4f}\n")
@@ -189,7 +199,39 @@ def test():
     _save_confmat(cm_thr, CLASSES, results_dir / "confusion_matrix_thresholded.png",
                   f"Confusion Matrix (Test – Thresholded @ {sad_threshold:.2f})")
 
+    # -------------------------
+    # B4: Per-corpus breakdown (Argmax)
+    # -------------------------
+    from collections import defaultdict
+    print("\n==== Per-corpus breakdown (Argmax) ====")
+    corpus_to_idx = defaultdict(list)
+    for i, fp in enumerate(X_test):
+        corpus_to_idx[infer_corpus_from_filename(fp)].append(i)
+
+    for corpus, idxs in sorted(corpus_to_idx.items()):
+        yt = y_true[idxs]
+        yp = np.array(y_pred_argmax, dtype=int)[idxs]
+        f1m = f1_score(yt, yp, average="macro")
+        print(f"{corpus:8s} | N={len(idxs):4d} | Macro-F1={f1m:.3f}")
+
+    # Save raw probabilities/file order
+    np.save(results_dir / "probs_test.npy", probs_all)
+    with open(results_dir / "file_order.txt", "w") as f:
+        for p in X_test:
+            f.write(p + "\n")
+
     print("\nResults saved to 'results/'")
 
 if __name__ == "__main__":
-    test()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to best_model.pt (defaults to MODEL_DIR/best_model.pt)")
+    parser.add_argument("--test_datasets", type=str, default="",
+                        help="Comma-separated list to evaluate (e.g. IEMOCAP,CREMA-D,JL,RAVDESS,TESS). "
+                             "If omitted, uses DEFAULT_TEST_DATASETS from config.")
+    parser.add_argument("--results_dir", type=str, default="results",
+                    help="Where to save evaluation results")
+
+    args = parser.parse_args()
+    chosen = [s.strip() for s in args.test_datasets.split(",") if s.strip()] or None
+    test(checkpoint_path=args.checkpoint, test_datasets=chosen)
