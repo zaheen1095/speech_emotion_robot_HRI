@@ -104,3 +104,10 @@ TRAIN_DATASETS = ["IEMOCAP", "CREMA-D", "JL", "RAVDESS", "SAVEE", "TESS"]
 DEFAULT_TEST_DATASETS = ["CREMA-D", "IEMOCAP", "JL", "RAVDESS", "TESS"]
 
 HELDOUT_DATASETS = [] 
+
+# ---- Phase C toggles ----
+USE_SSL_FRONTEND = True          # set True to enable wav2vec2/HubERT
+SSL_MODEL = "wav2vec2-base"       # or "hubert-base"
+SSL_FREEZE = True                 # start frozen
+SSL_FRAME_HOP_MS = 20             # for downstream temporal stride
+SSL_CACHE_DIR = "ssl_cache"       # where *_ssl.npy will be written

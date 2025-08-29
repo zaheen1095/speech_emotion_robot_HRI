@@ -11,6 +11,8 @@ tqdm
 sounddevice==0.4.6
 onnx
 onnxruntime==1.15.0
+transformers>=4.40
+soundfile
 
 # second time project installation
 
