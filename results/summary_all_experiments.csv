@@ -1,0 +1,3 @@
+experiment,mode,accuracy,f1_macro
+results,argmax,0.8775,0.8774
+results,thresholded,0.8835,0.8834
