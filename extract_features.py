@@ -6,6 +6,7 @@ from tqdm import tqdm
 from config import FEATURE_SETTINGS, RESAMPLED_DIR, FEATURES_DIR, USE_EXTRA_FEATURES, EXTRA_FEATURES, PROSODY_SETTINGS, AUGMENTED_DIR
 from utils import pad_sequence   # keep as-is
 from ssl_frontend import SSLFrontend
+import torch
 # --- helpers ----------------------------------------------------
 
 def _is_augmented_name(name: str) -> bool:

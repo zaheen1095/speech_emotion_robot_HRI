@@ -111,3 +111,6 @@ SSL_MODEL = "wav2vec2-base"       # or "hubert-base"
 SSL_FREEZE = True                 # start frozen
 SSL_FRAME_HOP_MS = 20             # for downstream temporal stride
 SSL_CACHE_DIR = "ssl_cache"       # where *_ssl.npy will be written
+
+# config.py
+CALIBRATION_DIR = Path("results/C3_temp_calib_C0") 

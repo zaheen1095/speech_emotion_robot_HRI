@@ -18,8 +18,7 @@ from config import (
     FEATURES_DIR, CLASSES, MODEL_DIR, BATCH_SIZE, FEATURE_SETTINGS,
     USE_ATTENTION, DATASET_PREFIXES, DEFAULT_TEST_DATASETS
 )
-from config import CALIBRATION_DIR
-import json
+
 # -------------------------
 # Dataset
 # -------------------------
@@ -45,8 +44,6 @@ def infer_corpus_from_filename(path_str: str) -> str:
 # Helpers
 # -------------------------
 def load_test_data(selected_corpora):
-    if selected_corpora is None:
-        selected_corpora = DEFAULT_TEST_DATASETS
     X, y = [], []
     for idx, emotion in enumerate(CLASSES):
         emotion_dir = FEATURES_DIR / 'test' / emotion
@@ -56,12 +53,9 @@ def load_test_data(selected_corpora):
             if file.endswith(".npy"):
                 full = str(emotion_dir / file)
                 corpus = infer_corpus_from_filename(full)
-                if (selected_corpora is None) or (corpus in selected_corpora):
+                if corpus in selected_corpora:              # <-- filter here
                     X.append(full)
                     y.append(idx)
-                # if corpus in selected_corpora:              # <-- filter here
-                #     X.append(full)
-                #     y.append(idx)
 
     if not X:
         raise SystemExit(
@@ -120,20 +114,13 @@ def test(checkpoint_path=None, test_datasets=None):
         model.load_state_dict(checkpoint)
         sad_threshold = 0.50
         print(f"Loaded plain state_dict; using default sad_threshold={sad_threshold:.2f}")
-    
+
     model.to(device)
     model.eval()
 
-    T = 1.0
     # indices for class-order safety
     try:
         sad_idx = CLASSES.index('sad')
-        tfile = Path(CALIBRATION_DIR) / "temperature.json"
-        if tfile.exists():
-            T = float(json.load(open(tfile, "r"))["temperature"])
-            print(f"[C3.2] Using temperature scaling T={T:.3f}")
-    except Exception as e:
-        print(f"[C3.1] Threshold not overridden ({e}); using checkpoint/default.)")
     except ValueError:
         raise SystemExit("Class 'sad' not found in CLASSES; thresholded report requires a 'sad' class.")
     happy_idx = CLASSES.index('happy') if 'happy' in CLASSES else (1 - sad_idx)
@@ -147,8 +134,6 @@ def test(checkpoint_path=None, test_datasets=None):
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             logits = model(inputs)              # [B, C]
-            if T != 1.0:
-                logits = logits / T
             preds = logits.argmax(dim=1)        # argmax
             y_true.extend(labels.cpu().tolist())
             y_pred_argmax.extend(preds.cpu().tolist())
