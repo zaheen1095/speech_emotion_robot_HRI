@@ -1,11 +1,11 @@
 {
-  "best_metric": 0.885938674397558,
+  "best_metric": 0.9317536562458071,
   "monitor": "f1_score_macro",
   "classes": [
     "happy",
     "sad"
   ],
-  "input_dim": 45,
+  "input_dim": 768,
   "used_attention": true,
   "used_extra_features": true,
   "extra_features": [

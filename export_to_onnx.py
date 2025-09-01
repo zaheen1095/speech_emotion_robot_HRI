@@ -23,7 +23,7 @@ def infer_input_dim_from_features():
     return int(d)
 
 def load_checkpoint_weights(ckpt_path, device):
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         return ckpt["model_state_dict"]
     return ckpt

@@ -7,7 +7,8 @@ RAW_AUDIO_DIR = DATASET_DIR / 'raw_audio'
 RESAMPLED_DIR = DATASET_DIR / 'resampled_audio'
 AUGMENTED_DIR   = DATASET_DIR / 'augmented_audio'
 
-FEATURES_DIR = DATASET_DIR / 'features'
+FEATURES_DIR = DATASET_DIR / 'features'   #MFCC
+FEATURES_DIR_SSL = DATASET_DIR / 'features_ssl'  #SSL
 MODEL_DIR = BASE_DIR / 'models'
 
 # === Feature Extraction ===
@@ -113,4 +114,5 @@ SSL_FRAME_HOP_MS = 20             # for downstream temporal stride
 SSL_CACHE_DIR = "ssl_cache"       # where *_ssl.npy will be written
 
 # config.py
-CALIBRATION_DIR = Path("results/C3_temp_calib_C0") 
+# CALIBRATION_DIR = Path("results/C3_temp_calib_C0") 
+CALIBRATION_DIR = Path("phaseC")

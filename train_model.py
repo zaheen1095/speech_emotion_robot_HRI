@@ -24,6 +24,8 @@ import argparse
 # -------------------------
 # Reproducibility
 # -------------------------
+
+FEATURES_ROOT = None
 def seed_everything(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -140,16 +142,17 @@ def infer_corpus_from_filename(path_str: str) -> str:
     return DATASET_PREFIXES.get(key, "UNKNOWN")
 
 
-def load_data(allowed_train_corpora=None, heldout_corpora=None):
+def load_data(features_root: Path, allowed_train_corpora=None, heldout_corpora=None):
     # phase B4
     if allowed_train_corpora is None:
         allowed_train_corpora = TRAIN_DATASETS
     if heldout_corpora is None:
         heldout_corpora = HELDOUT_DATASETS
-
+    # root = FEATURES_ROOT if FEATURES_ROOT is not None else FEATURES_DIR
+    FEATURES = Path(args.features_root)
     X_all, y_all, groups , corpora = [], [], [], [] 
     for idx, emotion in enumerate(CLASSES):
-        emotion_dir = FEATURES_DIR / 'train' / emotion
+        emotion_dir = Path(features_root) / 'train' / emotion
         if not emotion_dir.exists():
             continue
         for file in os.listdir(emotion_dir):
@@ -201,8 +204,9 @@ def load_data(allowed_train_corpora=None, heldout_corpora=None):
 def train():
     print("\n🚀 Loading data with clean validation (no augmented items in val)...")
     # X_train, y_train, X_val, y_val = load_data()
-    X_train, y_train, X_val, y_val = load_data(allowed_train_corpora=TRAIN_DATASETS,
-                                           heldout_corpora=HELDOUT_DATASETS)
+    X_train, y_train, X_val, y_val = load_data(features_root=FEATURES_ROOT,
+                                               allowed_train_corpora=TRAIN_DATASETS,
+                                               heldout_corpora=HELDOUT_DATASETS)
 
     aug_count = sum(1 for p in X_train if "__aug-" in Path(p).stem or ".aug" in p or "_aug" in p or "-aug" in p)
     print(f"[debug] Train files: {len(X_train)} | Augmented in train: {aug_count} ({aug_count/len(X_train):.1%})")
@@ -211,7 +215,7 @@ def train():
     train_loader = DataLoader(
         FeatureDataset(X_train, y_train, split="train", augment=True),
         batch_size=BATCH_SIZE, shuffle=True, drop_last=True,
-        num_workers=2, pin_memory=True
+        num_workers=2, pin_memory=torch.cuda.is_available()
     )
     val_loader = DataLoader(
         FeatureDataset(X_val, y_val, split="val", augment=False),
@@ -239,7 +243,7 @@ def train():
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=LABEL_SMOOTHING)
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.999))
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5, min_lr=1e-6, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5, min_lr=1e-6)
 
     USE_FOCAL = os.environ.get("USE_FOCAL_LOSS", "0") == "1"   # opt-in via env var
     FOCAL_GAMMA = float(os.environ.get("FOCAL_GAMMA", "2.0"))
@@ -353,6 +357,13 @@ def train():
 
         scheduler.step(monitor_value)
 
+        old_lr = optimizer.param_groups[0]['lr']
+        scheduler.step(monitor_value)
+        new_lr = optimizer.param_groups[0]['lr']
+        if new_lr != old_lr:
+            print(f"[scheduler] Reduced learning rate from {old_lr:.6f} to {new_lr:.6f}")
+
+
         writer.add_scalar('Loss/train', avg_train_loss, epoch)
         writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('Accuracy/train', train_acc, epoch)
@@ -431,8 +442,11 @@ if __name__ == "__main__":
                         help="Comma-separated list (e.g. IEMOCAP,CREMA-D,JL,RAVDESS,SAVEE,TESS)")
     parser.add_argument("--heldout_datasets", type=str, default=",".join(HELDOUT_DATASETS),
                         help="Comma-separated list (leave empty for none)")
+    parser.add_argument("--features_root", type=str, default=str(FEATURES_DIR),
+                    help="Root folder for features (MFCC or SSL)")
     args = parser.parse_args()
 
+    FEATURES_ROOT = Path(args.features_root)
     chosen_train = [s.strip() for s in args.train_datasets.split(",") if s.strip()]
     chosen_heldout = [s.strip() for s in args.heldout_datasets.split(",") if s.strip()]
     print(f"\nCross-domain setup → Train on: {chosen_train} | Held-out: {chosen_heldout}")

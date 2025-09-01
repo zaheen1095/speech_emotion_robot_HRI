@@ -1,15 +1,15 @@
               precision    recall  f1-score   support
 
-       happy     0.8614    0.9136    0.8868       660
-         sad     0.9084    0.8535    0.8801       662
+       happy     0.9213    0.8333    0.8751       660
+         sad     0.8483    0.9290    0.8868       662
 
-    accuracy                         0.8835      1322
-   macro avg     0.8849    0.8836    0.8834      1322
-weighted avg     0.8849    0.8835    0.8834      1322
+    accuracy                         0.8812      1322
+   macro avg     0.8848    0.8812    0.8810      1322
+weighted avg     0.8847    0.8812    0.8810      1322
 
 
-Overall Accuracy: 0.8835
-F1 Score (Macro): 0.8834
-F1 Score (Weighted): 0.8834
+Overall Accuracy: 0.8812
+F1 Score (Macro): 0.8810
+F1 Score (Weighted): 0.8810
 
-Used sad_threshold=0.660
+Used sad_threshold=0.460
