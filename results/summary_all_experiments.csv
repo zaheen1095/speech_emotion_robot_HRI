@@ -1,4 +1,10 @@
 experiment,mode,accuracy,f1_macro
+C3_eval_calibrated,argmax,0.888,0.8879
+C3_eval_calibrated,thresholded,0.8661,0.8656
+C3_ssl_final,argmax,0.888,0.8879
+C3_ssl_final,thresholded,0.8661,0.8656
+C3_ssl_final_calibrated,argmax,0.888,0.8879
+C3_ssl_final_calibrated,thresholded,0.8661,0.8656
 C_LOCO_holdout_CREMAD,argmax,0.668,0.6296
 C_LOCO_holdout_CREMAD,thresholded,0.668,0.6296
 C_LOCO_holdout_IEMOCAP,argmax,0.7682,0.7681
