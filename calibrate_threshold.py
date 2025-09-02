@@ -9,7 +9,7 @@ from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.model_selection import GroupShuffleSplit
 
 from models.cnn_bilstm import CNNBiLSTM
-from config import FEATURES_DIR, MODEL_DIR, BATCH_SIZE, CLASSES, USE_ATTENTION
+from config import FEATURES_DIR, MODEL_DIR, BATCH_SIZE, CLASSES, USE_ATTENTION, FEATURES_DIR_SSL
 
 AUG_TOKENS = (".aug","_aug","-aug","noise","reverb","rir","pitch","tempo","speed","stretch")
 
@@ -22,13 +22,13 @@ def _label_from_path(p:Path)->int:
     return CLASSES.index(p.parent.name)
 
 def _scan_split(split:str):
-    root = Path(FEATURES_DIR)/split
+    root = Path(FEATURES_DIR_SSL)/split
     paths = list(root.rglob("*.npy"))
     labels = [_label_from_path(p) for p in paths]
     return paths, labels
 
 def _build_val_from_train(val_fraction=0.20, seed=42):
-    root = Path(FEATURES_DIR)/"train"
+    root = Path(FEATURES_DIR_SSL)/"train"
     paths, labels, groups = [], [], []
     for ci, cname in enumerate(CLASSES):
         for p in (root/cname).rglob("*.npy"):
@@ -108,10 +108,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=str, default=str(Path(MODEL_DIR)/"best_model.pt"))
     ap.add_argument("--out_dir",   type=str, default="results/C3_temp_calib_C0")
+    ap.add_argument("--features_root", type=str, default=str(FEATURES_DIR))
     args = ap.parse_args()
 
     Xv, yv = _build_val_from_train()
-    Xt, yt = _scan_split("test")
+    Xt, yt = _scan_split("test" )
     assert Xv, "No validation features found/constructed."
     assert Xt, "No test features found."
 
@@ -169,6 +170,7 @@ def main():
     print(f"[C3.2] Brier:    {brier_uncal:.4f} → {brier_cal:.4f}")
     print(f"[C3.2] ECE:      {ece_uncal:.4f} → {ece_cal:.4f}")
     print(f"[C3.2] Wrote {out/'temperature.json'} and reliability diagrams.")
+    Path(out/"temperature.txt").write_text(f"{T_star:.6f}\n")
 
 if __name__ == "__main__":
     main()

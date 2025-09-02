@@ -115,4 +115,4 @@ SSL_CACHE_DIR = "ssl_cache"       # where *_ssl.npy will be written
 
 # config.py
 # CALIBRATION_DIR = Path("results/C3_temp_calib_C0") 
-CALIBRATION_DIR = Path("phaseC")
+CALIBRATION_DIR = Path("C3_calibration_SSL")
