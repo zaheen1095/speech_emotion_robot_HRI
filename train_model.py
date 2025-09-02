@@ -56,7 +56,10 @@ class FeatureDataset(Dataset):
         # train-only SpecAugment (feature-level)
         if self.split == "train" and self.augment:
             D = x.shape[1]
-            x = spec_augment(x.T, p=0.5).T  # keep (T, D)
+            if D <= 128:
+                # MFCC / mel-style features → OK to mask
+                x = spec_augment(x.T, p=0.5).T
+            x = np.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
 # ---- Optional Focal Loss (B3) ----
