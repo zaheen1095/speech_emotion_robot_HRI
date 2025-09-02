@@ -55,6 +55,7 @@ class FeatureDataset(Dataset):
         y = self.labels[idx]
         # train-only SpecAugment (feature-level)
         if self.split == "train" and self.augment:
+            D = x.shape[1]
             x = spec_augment(x.T, p=0.5).T  # keep (T, D)
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
