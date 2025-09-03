@@ -11,7 +11,7 @@ tqdm
 sounddevice==0.4.6
 onnx
 onnxruntime==1.15.0
-
+pip install pyttsx3
 # second time project installation
 
 # pip install librosa  
