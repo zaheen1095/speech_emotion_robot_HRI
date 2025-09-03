@@ -1,0 +1,25 @@
+# file_order.txt
+# Reproducible pipeline file order (Phase A → C)
+
+augmentations.py
+offline_augmentation.py
+resample_audio.py
+extract_features.py
+config.py
+cnn_bilstm.py
+train_model.py
+test_model.py
+testing_emotion.py
+calibrate_threshold.py
+ssl_frontend.py
+stress_utils.py
+stress_eval.py
+summarize_experiments.py
+export_to_onnx.py
+onnx_benchmark.py
+onnx_inference.py
+
+# Notes:
+# - datasets/raw_audio → augmented_audio → resampled_audio → features → models/results
+# - keep "config.py" consistent across all runs
+# - auxiliary files (seeds.md, runbook.md, env.txt, data_hashes.md) live at repo root
