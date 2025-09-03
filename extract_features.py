@@ -5,7 +5,8 @@ from pathlib import Path
 from tqdm import tqdm
 from config import FEATURE_SETTINGS, RESAMPLED_DIR, FEATURES_DIR, USE_EXTRA_FEATURES, EXTRA_FEATURES, PROSODY_SETTINGS, AUGMENTED_DIR
 from utils import pad_sequence   # keep as-is
-
+from ssl_frontend import SSLFrontend
+import torch
 # --- helpers ----------------------------------------------------
 
 def _is_augmented_name(name: str) -> bool:
@@ -52,6 +53,18 @@ def _compute_prosody_TF(y, sr, T_target):
         F = F[:, :T_target]
     return F.T  # (T_target, F_extra)
 
+def extract_ssl_feats(wav, cfg):
+    global _ssl
+    if not hasattr(extract_ssl_feats, "_ssl"):
+        extract_ssl_feats._ssl = SSLFrontend(cfg.SSL_MODEL, cfg.SSL_FREEZE, device="cuda" if torch.cuda.is_available() else "cpu")
+    return extract_ssl_feats._ssl(wav)
+
+def load_filelist(split="train"):
+    """Return a list of audio file paths for the given split."""
+    wav_exts = (".wav", ".WAV")
+    in_root = RESAMPLED_DIR / split
+    files = [p for p in in_root.rglob("*") if p.suffix in wav_exts]
+    return files
 # --- core extraction --------------------------------------------
 
 def extract_mfcc(audio_path: str = None, array: np.ndarray = None, sr: int = None) -> np.ndarray:

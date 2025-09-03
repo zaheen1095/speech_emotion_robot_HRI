@@ -5,7 +5,8 @@ from config import FEATURE_SETTINGS, CLASSES, RESPONSES, INFERENCE_SETTINGS
 from extract_features import extract_mfcc
 
 # --- Load ONNX Model ---
-onnx_model_path = "models/best_model.onnx"
+# onnx_model_path = "models/best_model.onnx"
+onnx_model_path = "models/model_c0.onnx" 
 session = ort.InferenceSession(onnx_model_path, providers=['CPUExecutionProvider'])
 input_name = session.get_inputs()[0].name
 
