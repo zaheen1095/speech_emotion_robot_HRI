@@ -1,0 +1,87 @@
+import matplotlib.pyplot as plt
+import networkx as nx
+
+# Calibration nodes
+calib_nodes = [
+    "Logits",
+    "Temperature Scaling\n(divide by T)",
+    "Softmax",
+    "Posterior p(sad)",
+    "Compare with τ",
+    "Final Label\n(happy/sad)"
+]
+
+G2 = nx.DiGraph()
+for i in range(len(calib_nodes)-1):
+    G2.add_edge(calib_nodes[i], calib_nodes[i+1])
+
+pos2 = {calib_nodes[i]: (i, 0) for i in range(len(calib_nodes))}
+
+plt.figure(figsize=(14, 2.5))
+nx.draw(G2, pos2, with_labels=True, node_color="lightgreen", node_size=6000,
+        font_size=8, font_weight="bold", arrows=True, arrowstyle="->", arrowsize=15)
+
+plt.title("Calibration and Decision Flow", fontsize=14)
+plt.axis("off")
+plt.show()
+
+# # Calibration flow graph
+# G = nx.DiGraph()
+
+# nodes = [
+#     "Logits",
+#     "Temperature Scaling\n(divide by T)",
+#     "Softmax",
+#     "Posterior p(sad)",
+#     "Compare with τ",
+#     "Final Label\n(happy/sad)"
+# ]
+
+# # Add edges in sequence
+# for i in range(len(nodes)-1):
+#     G.add_edge(nodes[i], nodes[i+1])
+
+# # Layout: simple left-to-right line
+# pos = {nodes[i]: (i, 0) for i in range(len(nodes))}
+
+# plt.figure(figsize=(12, 2))
+# nx.draw(G, pos, with_labels=True, node_color="lightgreen", node_size=5000,
+#         font_size=8, font_weight="bold", arrows=True, arrowstyle="->", arrowsize=15)
+
+# plt.title("Calibration and Decision Flow", fontsize=12)
+# plt.axis("off")
+# plt.show()
+
+
+# import matplotlib.pyplot as plt
+# import networkx as nx
+
+# # Define nodes
+# pipeline_nodes = [
+#     "Audio (16 kHz)",
+#     "Preprocessing\n(normalize + trim)",
+#     "5 s Window\n(pad/crop)",
+#     "Feature Extraction\n(MFCC + prosody)",
+#     "CNN",
+#     "BiLSTM",
+#     "Attention",
+#     "Dense (2-way)",
+#     "Post-hoc\n(temperature + threshold τ)"
+# ]
+
+# # Directed graph
+# G = nx.DiGraph()
+# for i in range(len(pipeline_nodes)-1):
+#     G.add_edge(pipeline_nodes[i], pipeline_nodes[i+1])
+
+# # Layout (horizontal line)
+# pos = {pipeline_nodes[i]: (i, 0) for i in range(len(pipeline_nodes))}
+
+# # Plot
+# plt.figure(figsize=(16, 3))
+# nx.draw(G, pos, with_labels=True, node_color="skyblue", node_size=6000,
+#         font_size=8, font_weight="bold", arrows=True, arrowstyle="->", arrowsize=15)
+
+# plt.title("SER Pipeline", fontsize=14)
+# plt.axis("off")
+# plt.show()
