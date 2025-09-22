@@ -21,7 +21,7 @@ USE_ONNX = True
 # --- Load model once
 if USE_ONNX:
     import onnxruntime as ort
-    session = ort.InferenceSession("models/best_model.onnx")
+    session = ort.InferenceSession("models/model_c0.onnx")
     input_name = session.get_inputs()[0].name
 else:
     import torch
