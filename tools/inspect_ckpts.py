@@ -1,4 +1,4 @@
-# inspect_ckpts.py
+# # inspect_ckpts.py
 import argparse
 from pathlib import Path
 import torch
@@ -39,3 +39,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# following code for to check the onnx file which one is mfcc or ssl
+
+# import onnx, sys
+# m = onnx.load(sys.argv[1])
+# for i,inp in enumerate(m.graph.input): 
+#     shape = [d.dim_value for d in inp.type.tensor_type.shape.dim]
+#     print(f"input{i}:", shape)

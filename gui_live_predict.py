@@ -1,329 +1,284 @@
-import sys
+# gui_live_predict.py
+import sys, os, json, threading, traceback
 import numpy as np
-import librosa
-import sounddevice as sd
-import pyttsx3
-import threading
-from PyQt5.QtCore import Qt,QSize
-from PyQt5.QtGui import QPixmap, QIcon
+import librosa, sounddevice as sd, pyttsx3
+
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QIcon,QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
 )
-# your own config
-from config import FEATURE_SETTINGS, CLASSES, RESPONSES
+
+# --- Project modules ---
+from config import FEATURE_SETTINGS, RESPONSES
 from extract_features import extract_mfcc
+# from ssl_frontend import SSLFrontend  # used only if SSL model found
 
-# Choose backend: ONNX or PyTorch
-USE_ONNX = True
+import onnxruntime as ort
 
+# ---------------- Files & loading ----------------
+MODELS_DIR = "models"
+TRACKS = [
+    {"name": "SSL v1",  "dir": os.path.join(MODELS_DIR, "ssl_v1"),  "onnx": ["model_ssl.onnx"],           "type": "ssl"},
+    {"name": "MFCC v1", "dir": os.path.join(MODELS_DIR, "mfcc_v1"), "onnx": ["model_mfcc.onnx", "model_mfcc_int8.onnx"], "type": "mfcc"},
+]
 
-# --- Load model once
-if USE_ONNX:
-    import onnxruntime as ort
-    session = ort.InferenceSession("models/best_model.onnx")
-    input_name = session.get_inputs()[0].name
-else:
-    import torch
-    from models.cnn_bilstm import CNNBiLSTM
-    model = CNNBiLSTM(input_dim=39, num_classes=len(CLASSES))
-    model.load_state_dict(torch.load("models/best_model.pt", map_location="cpu"))
-    model.eval()
+def softmax(x):
+    x = x - np.max(x); e = np.exp(x); return e / e.sum()
 
-# def extract_mfcc_from_array(y, sr, max_len=150):                  #I am not going to use now, later will check
-#     mel_spec = librosa.feature.melspectrogram(
-#         y=y, sr=sr,
-#         n_fft=FEATURE_SETTINGS['n_fft'],
-#         hop_length=FEATURE_SETTINGS['hop_length'],
-#         n_mels=FEATURE_SETTINGS['n_mels'],
-#         fmin=FEATURE_SETTINGS['fmin'],
-#         fmax=FEATURE_SETTINGS['fmax']
-#     )
-#     mel_db = librosa.power_to_db(mel_spec)
-#     mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=FEATURE_SETTINGS['n_mfcc'])
+def _speak_async(text, on_done):
+    def run():
+        try:
+            eng = pyttsx3.init()
+            eng.say(text); eng.runAndWait()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            on_done()
+    threading.Thread(target=run, daemon=True).start()
 
-#     features = [mfcc]
-    
-#     if FEATURE_SETTINGS['use_delta']:
-#         features.append(librosa.feature.delta(mfcc))
-#     if FEATURE_SETTINGS['use_delta_delta']:
-#         features.append(librosa.feature.delta(mfcc, order=2))
+def _read_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
-#     stacked = np.vstack(features).T
+def _find_existing(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
 
-#     if stacked.shape[0] < max_len:
-#         pad = max_len - stacked.shape[0]
-#         stacked = np.pad(stacked, ((0, pad), (0, 0)))
-#     else:
-#         stacked = stacked[:max_len, :]
-    
-#     print("MFCC shape (after stack):", stacked.shape)
-
-#     return stacked.astype(np.float32)
-
+# ---------------- Chat UI ----------------
 class ChatBubble(QLabel):
     def __init__(self, text, is_user=False):
         super().__init__(text)
         self.setWordWrap(True)
-        self.setMaximumWidth(300)
+        self.setMaximumWidth(360)
         color = "#e0e0e0" if is_user else "#95abbe"
-        self.setStyleSheet(f"background:{color}; border-radius:10px;padding:8px;")
-        # if is_user:
-        #     self.setStyleSheet(
-        #         "background:#e0e0e0; border-radius:10px; padding:8px;"
-        #     )
-        # else:
-        #     self.setStyleSheet(
-        #         "background:#cfe9ff; border-radius:10px; padding:8px;"
-        #     )
+        self.setStyleSheet(f"background:{color}; border-radius:10px; padding:8px;")
 
-
-# --- GUI App
+# ---------------- Main App ----------------
 class EmotionApp(QWidget):
     def __init__(self):
         super().__init__()
+    
         self.setWindowTitle("Speech Emotion Detection Application")
         self.setGeometry(100, 100, 400, 500)
 
-        # — Add a microphone indicator —
+        # top bar
         self.mic_icon = QLabel()
-        # load two small images (mic_off.png and mic_on.png) into your project folder
-        self.mic_off = QPixmap("mic-off.png").scaled(24,24, Qt.KeepAspectRatio)
-        self.mic_on  = QPixmap("mic-on.png").scaled(24,24, Qt.KeepAspectRatio)
+        self.mic_off = QPixmap("mic-off.png").scaled(24,24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.mic_on  = QPixmap("mic-on.png").scaled(24,24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.mic_icon.setPixmap(self.mic_off)
 
         # Chat area
         self.chat_layout = QVBoxLayout()
         self.chat_layout.setAlignment(Qt.AlignTop)
-        container = QWidget(); 
-        container.setLayout(self.chat_layout)
-        scroll    = QScrollArea(); 
-        scroll.setWidgetResizable(True); scroll.setWidget(container)
-        self.scroll_area   = scroll  #check this and below line code after analysing UI.
-        self.is_processing = False
+        container = QWidget(); container.setLayout(self.chat_layout)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(container)
+        self.scroll = scroll
 
-        # Record button
-        self.button = QPushButton(" Record & Detect")
-        self.button.setIcon(QIcon(self.mic_off))
-        self.button.setIconSize(QSize(24,24))
+        # Record button (single control)
+        self.button = QPushButton("🎤  Record & Detect")
+        self.button.setIcon(QIcon("mic-off.png"))
+        self.button.setIconSize(QSize(20, 20))
         self.button.clicked.connect(self.record_and_predict)
 
-        # Main layout: MIC ICON goes *before* the scroll
-        main_layout = QVBoxLayout(self)
-        main_layout.addWidget(self.mic_icon, alignment=Qt.AlignCenter)
-        main_layout.addWidget(scroll)
-        main_layout.addWidget(self.button)
+        # Layout
+        # head = QHBoxLayout(); head.addWidget(title); head.addStretch()
+        main = QVBoxLayout(self)
+        main.addWidget(self.mic_icon, alignment=Qt.AlignCenter)
+        # main.addLayout(head)
+        main.addWidget(scroll)
+        main.addWidget(self.button)
 
-        # Record button with mic icons
-        #ToDo - check the above UI is fine then delete this , otherwise check this UI is working accordingly or not.
-        # self.mic_off = QPixmap("mic-off.png").scaled(24,24, Qt.KeepAspectRatio)
-        # self.mic_on  = QPixmap("mic-on.png").scaled(24,24, Qt.KeepAspectRatio)
-        # self.button = QPushButton("Record & Detect")
-        # self.button.setIcon(QIcon(self.mic_off))
-        # self.button.setIconSize(QSize(24,24))
-        # self.button.clicked.connect(self.record_and_predict)
+        # Runtime state
+        self.is_processing = False
+        self.session = None
+        self.input_name = None
+        self.model_type = None       # "ssl" or "mfcc"
+        self.classes = ["happy", "sad"]
+        self.calib = {"mode":"threshold","sad_threshold":0.57,"min_confidence":0.50,"min_amp":0.02,"record_seconds":3.0}
+        self.temperature = 1.0
+        self.ssl = None              # SSLFrontend (lazy)
 
-        # # Layout
-        # main = QVBoxLayout(self)
-        # main.addWidget(scroll)
-        # main.addWidget(self.button)
+        self._auto_load_model()
 
-        # self.scroll_area   = scroll
-        # self.is_processing = False
+    # ---- Robot integration hook (use later) ----
+    def on_prediction(self, label: str):
+        """
+        Placeholder for robot integration.
+        E.g., send event to behavior planner:
+        robot.handle_emotion(label)
+        """
+        pass
 
-    def append_message(self, text, is_user=False):
+    # ---- Minimal chat helpers ----
+    def _add_msg(self, text, is_user=False):
         bubble = ChatBubble(text, is_user)
-        hbox   = QHBoxLayout()
+        row = QHBoxLayout()
         if is_user:
-            hbox.addStretch()
-            hbox.addWidget(bubble)
+            row.addStretch(); row.addWidget(bubble)
         else:
-            hbox.addWidget(bubble)
-            hbox.addStretch()
-        frame = QFrame()
-        frame.setLayout(hbox)
-        self.chat_layout.addWidget(frame)
-        # auto-scroll to bottom
-        sb = self.scroll_area.verticalScrollBar()
-        sb.setValue(sb.maximum())
+            row.addWidget(bubble); row.addStretch()
+        f = QFrame(); f.setLayout(row)
+        self.chat_layout.addWidget(f)
+        sb = self.scroll.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    # ---- Model load (auto, silent) ----
+    def _auto_load_model(self):
+        try:
+            # Prefer SSL, fallback to MFCC
+            chosen = None
+            for t in TRACKS:
+                tdir = t["dir"]
+                onnx_path = _find_existing([os.path.join(tdir, fn) for fn in t["onnx"]])
+                if onnx_path:
+                    chosen = (t, onnx_path); break
+            if not chosen:
+                raise FileNotFoundError("No ONNX model found in models/ssl_v1 or models/mfcc_v1.")
+
+            track, onnx_path = chosen
+            self.model_type = track["type"]
+
+            print(f"[BOOT] Emotion backend: {self.model_type.upper()} • {os.path.basename(onnx_path)}")
+
+
+            # load per-track calibration + optional temperature
+            calib_path = os.path.join(track["dir"], "calibration.json")
+            self.calib.update(_read_json(calib_path, {}))
+            temp = _read_json(os.path.join(track["dir"], "temperature.json"), {"temperature":1.0})
+            self.temperature = float(temp.get("temperature", 1.0))
+
+            # classes order (optional in calibration)
+            self.classes = _read_json(calib_path, {}).get("classes", self.classes)
+
+            # ORT session
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1; so.inter_op_num_threads = 1; so.log_severity_level = 3
+            self.session = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
+            self.input_name = self.session.get_inputs()[0].name
+
+            # lazy SSL frontend if needed
+            if self.model_type == "ssl" and self.ssl is None:
+                # reduce HF noise
+                import warnings
+                try:
+                    from transformers.utils import logging as hf_logging
+                    hf_logging.set_verbosity_error()
+                except Exception:
+                    pass
+                warnings.filterwarnings("ignore", message="Passing `gradient_checkpointing`.*")
+                warnings.filterwarnings("ignore", message="`clean_up_tokenization_spaces`.*")
+                from ssl_frontend import SSLFrontend
+                self.ssl = SSLFrontend()  # let your class pick model & device
+
+        except Exception as e:
+            traceback.print_exc()
+            self._add_msg("Setup problem. Please check model files.", is_user=False)
+
+    # ---- Features (private) ----
+    def _feat_mfcc(self, y, sr):
+        # ensure target sr
+        target = FEATURE_SETTINGS.get("sample_rate", 16000)
+        if sr != target:
+            y = librosa.resample(y, orig_sr=sr, target_sr=target); sr = target
+        # conservative trim
+        try:
+            yt, _ = librosa.effects.trim(y, top_db=30)
+            if len(yt) > int(0.25 * sr): y = yt
+        except: pass
+        return extract_mfcc(array=y, sr=sr)  # (T,D)
+
+    def _feat_ssl(self, y, sr):
+        # SSLFrontend typically expects 16 kHz mono waveform
+        if sr != 16000:
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000); sr = 16000
+        try:
+            yt, _ = librosa.effects.trim(y, top_db=30)
+            if len(yt) > int(0.25 * sr): y = yt
+        except: pass
+        return self.ssl(y)  # (T,D) embeddings
+
+    # ---- Decoding (silent; no probs shown) ----
+    def _decode(self, probs):
+        # class order from calibration if provided
+        try:
+            idx_h = self.classes.index("happy"); idx_s = self.classes.index("sad")
+        except ValueError:
+            idx_h, idx_s = 0, 1
+        p_h, p_s = float(probs[idx_h]), float(probs[idx_s])
+        p_max = max(p_h, p_s)
+        if p_max < float(self.calib.get("min_confidence", 0.50)):
+            return "Uncertain"
+        if self.calib.get("mode", "threshold") == "threshold":
+            return "sad" if p_s >= float(self.calib.get("sad_threshold", 0.57)) else "happy"
+        return "happy" if p_h >= p_s else "sad"
 
     def _finish(self):
-        """Turn mic icon off and re-enable the button."""
         self.mic_icon.setPixmap(self.mic_off)
-        self.button.setText("🎤 Record & Detect")
-        self.button.setIcon(QIcon(self.mic_off))
+        self.button.setText("🎤  Record & Detect")
+        self.button.setIcon(QIcon("mic-off.png"))
         self.button.setEnabled(True)
         self.is_processing = False
-        #Todo, check above code is workign fine on UI keep it otherwise replace with the following one 
-        # self.button.setEnabled(True)
-        # self.button.setText("🎤 Record & Detect")
-        # self.button.setIcon(QIcon(self.mic_off))
-        # self.is_processing = False
 
-    def _speak_and_finish(self, text):
-        """Speak text (fresh engine) then call _finish()."""
-        engine = pyttsx3.init()
-        engine.say(text)
-        engine.runAndWait()
-        self._finish()
-    
+    # ---- Main action ----
     def record_and_predict(self):
-        # 1) Guard against re-entry
-        if self.is_processing:
+        if self.is_processing or self.session is None:
             return
         self.is_processing = True
         self.button.setEnabled(False)
-
-        # 2) Show “recording” state
-        self.button.setText("🔴 Recording…")
-        self.button.setIcon(QIcon(self.mic_on))
+        self.button.setText("🔴  Listening…")
+        self.button.setIcon(QIcon("mic-on.png"))
+        self.mic_icon.setPixmap(self.mic_on)
         QApplication.processEvents()
 
         try:
-            # 3) Capture 3s of audio
-            sr    = FEATURE_SETTINGS['sample_rate']
-            audio = sd.rec(int(3 * sr), samplerate=sr, channels=1)
+            # record
+            sr = FEATURE_SETTINGS.get("sample_rate", 16000)
+            dur = float(self.calib.get("record_seconds", 3.0))
+            y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
             sd.wait()
-            audio = audio.flatten()
+            y = y.flatten()
 
-            # 4) Silence check
-            amp = float(np.max(np.abs(audio)))
-            if amp < 0.02:
-                reply = "I couldn't hear anything. Could you try speaking a bit louder?"
-                self.append_message(reply, is_user=False)
-                threading.Thread(
-                    target=self._speak_and_finish,
-                    args=(reply,),
-                    daemon=True
-                ).start()
+            # audibility gate
+            if float(np.max(np.abs(y))) < float(self.calib.get("min_amp", 0.02)):
+                reply = RESPONSES.get("Uncertain",
+                        "I couldn't hear clearly. Please speak a bit closer to the mic.")
+                self._add_msg(reply, is_user=False)
+                _speak_async(reply, self._finish)
                 return
 
-            # 5) Show user bubble
-            self.append_message("🎤 (audio captured)", is_user=True)
+            self._add_msg("🎤 (audio captured)", is_user=True)
+            QApplication.processEvents()
+            # features based on loaded model type
+            feats = self._feat_ssl(y, sr) if self.model_type == "ssl" else self._feat_mfcc(y, sr)
+            x = feats[np.newaxis, :, :].astype("float32")  # [1,T,D]
 
-            # 6) Feature extraction & ONNX inference
-            feats = extract_mfcc(array=audio, sr=sr)
-            inp   = feats[np.newaxis, :, :]
-            raw   = session.run(None, {input_name: inp})[0][0]
-            exps  = np.exp(raw - np.max(raw))
-            probs = exps / exps.sum()
+            # inference → temperature → probs → decode
+            logits = self.session.run(None, {self.input_name: x})[0][0]
+            T = max(1e-6, float(self.temperature))
+            probs = softmax(logits / T)
+            label = self._decode(probs)
 
-            conf, idx = float(np.max(probs)), int(np.argmax(probs))
-            emotion   = "Uncertain" if conf < 0.5 else CLASSES[idx]
-            reply     = RESPONSES[emotion]
+            # text reply (no numbers)
+            reply = RESPONSES.get(label, "I'm here with you.")
+            self._add_msg(reply, is_user=False)
+            self.on_prediction(label)  # hook for robot behavior
 
-            print(f"[DEBUG] probs={probs}, conf={conf:.2f}, idx={idx}")
-            self.append_message(reply, is_user=False)
-            threading.Thread(
-                target=self._speak_and_finish,
-                args=(reply,),
-                daemon=True
-            ).start()
+            _speak_async(reply, self._finish)
 
-        except Exception as e:
-            print("❌ record_and_predict crashed:", e)
-
-        finally:
-            # 7) Always reset button + icon + flag
+        except Exception:
+            traceback.print_exc()
+            self._add_msg("Something went wrong. Let's try again.", is_user=False)
             self._finish()
-            # Note: _finish() does:
-            #   self.button.setText("🎤 Record & Detect")
-            #   self.button.setIcon(QIcon(self.mic_off))
-            #   self.button.setEnabled(True)
-            #   self.is_processing = False
-            # So you don't need to duplicate that here.
 
-    # def record_and_predict(self):
-    #     if self.is_processing:
-    #         return
-    #     self.is_processing = True
-    #     self.button.setEnabled(False)
-
-    #     # 1) Turn mic icon ON
-    #     self.mic_icon.setPixmap(self.mic_on)
-    #     # self.button.setIcon(QIcon(self.mic_on))   # I can use this as well.
-    #     self.button.setText(" 🔴 Recording...")    # **** new add for testing, no work then remove it
-    #     QApplication.processEvents()
-
-    #     try:
-    #         # 2) Record 3s
-    #         sr = FEATURE_SETTINGS['sample_rate']
-    #         audio = sd.rec(int(3*sr), samplerate=sr, channels=1)
-    #         sd.wait()
-    #         audio = audio.flatten()
-    #         amp = np.max(np.abs(audio))
-    #         # 3) Silence check
-    #         if  amp < 0.02:
-    #             print(f"[DEBUG] silence branch (max amplitude={amp:.4f})")   # ← add this
-    #             bot_reply = "I couldn't hear anything. Could you try speaking a bit louder?"
-
-    #             print(f"[DEBUG] bot_reply (silence) = {bot_reply!r}") 
-                
-    #             self.append_message(bot_reply, is_user=False)
-
-    #             # ✅ This will speak and then reset the state
-    #             threading.Thread(
-    #                 target=self._speak_and_finish,
-    #                 args=(bot_reply,),
-    #                 daemon=True
-    #             ).start()
-    #             return  # ✅ SAFE: _finish() will still be called after speech
-
-
-    #         # 4) Show a user bubble placeholder
-    #         self.append_message("(audio captured)", is_user=True)
-
-    #         # 5) Feature extraction & inference
-    #         feats = extract_mfcc_from_array(audio, sr)
-    #         inp = feats[np.newaxis,:,:].astype(np.float32)
-    #         if USE_ONNX:
-    #             # probs = session.run(None, {input_name: inp})[0][0]     #*** no work then remove it 
-    #             raw_logits = session.run(None, {input_name: inp})[0][0]
-    #             exp_scores = np.exp(raw_logits - np.max(raw_logits))
-    #             probs = exp_scores / exp_scores.sum()
-    #             print("probs-", probs)
-    #         else:
-    #             import torch
-    #             logits = model(torch.tensor(inp).unsqueeze(0))
-    #             probs  = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
-    #         conf= float(np.max(probs))
-    #         pred_idx = int(np.argmax(probs))
-    #         # DEBUG: print out to console
-    #         print(f"[DEBUG] raw probs={probs}, conf={conf:.2f}, idx={pred_idx}")
-
-    #         # 6) Map to emotion
-    #         emotion = "Uncertain" if conf < 0.5 else CLASSES[pred_idx]
-    #         bot_reply= RESPONSES[emotion]
-
-    #         # 7) Show bot bubble
-    #         self.append_message(bot_reply, is_user=False)
-
-    #         # 8) Speak
-    #         threading.Thread(
-    #             target=self._speak_and_finish,
-    #             args=(bot_reply,),
-    #             daemon=True
-    #         ).start()
-
-    #     except Exception as e:
-    #         self.label.setText("Error - Click 'Record' to retry", e)
-    #         self.result_label.setText(f"Error: {str(e)}")
-    #         print(f"Error: {e}")
-    #         self._finish()
-        
-    #     finally:
-    #         self.button.setText("Record & Detect")
-    #         self.button.setIcon(QIcon(self.mic_off))
-    #         self.button.setEnabled(True)
-    #         self.is_processing = False
-    #         self._finish()
-            
-    #     print(f"You said it with a {emotion.upper()} tone.")
-
-# --- Run
+# ---- Run ----
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = EmotionApp()
-    window.show()
+    w = EmotionApp()
+    w.show()
     sys.exit(app.exec_())
