@@ -1,0 +1,5 @@
+{
+  "threshold": 0.57,
+  "temperature": 1.0,
+  "calibrated_on": "train"
+}
