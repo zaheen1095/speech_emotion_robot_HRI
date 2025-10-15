@@ -2,4 +2,8 @@ datasets/
 __pycache__/
 runs/
 
+models/vosk-model-en-us-0.22/
+debug_last.wav
+/session_log.csv
 
+**/session_log.csv

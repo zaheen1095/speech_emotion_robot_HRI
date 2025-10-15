@@ -437,38 +437,16 @@ class EmotionApp(QWidget):
             if self._should_decay_lock() and label in ("happy", "sad"):
                 self._lock_emotion(label)
                 # optional: show the detection explicitly
-                self._add_msg_safe(f"(detected {label})", is_user=False)
+                # self._add_msg_safe(f"(detected {label})", is_user=False)
 
             # Self-report override from transcript
             self._maybe_override_from_text(transcript)
 
             # Always use the LOCKED emotion for the LLM
             emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
-
-            # First turn: use RESPONSES keyed by emotion; afterwards use LLM
-            # if self.dialog_phase == "opener":
-            #     reply = RESPONSES.get(
-            #         emotion_for_llm,
-            #         RESPONSES.get("Uncertain", "I am not sure how you are feeling. Would you like to try again.")
-            #     )
-            #     self.dialog_phase = "chat"
-            # else:
-            #     reply = self.chat.reply(emotion_for_llm, transcript)
-
-            # self.turns_since_lock += 1
 
             # --- emotion locking / decay ---
-            if self._should_decay_lock() and label in ("happy", "sad"):
-                self._lock_emotion(label)
-                # optional: show the detection explicitly
-                self._add_msg_safe(f"(detected {label})", is_user=False)
-
-            # Self-report override from transcript
-            self._maybe_override_from_text(transcript)
-
-            # Always use the LOCKED emotion for the LLM
-            emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
-
+      
             # First turn: use RESPONSES keyed by emotion; afterwards use LLM
             if self.dialog_phase == "opener":
                 reply = RESPONSES.get(
