@@ -14,7 +14,7 @@ FIRST_TURN_EMO_ONLY   = True   # First press: speak 1 supportive line from emoti
 USE_ASR_GATE          = True   # If transcript is very short, show a gentle nudge (but DON'T block LLM)
 ASR_MIN_WORDS         = 2
 AMP_MIN               = 0.05   # minimum peak amplitude to accept audio
-SAVE_DEBUG_WAV        = True
+# SAVE_DEBUG_WAV        = True
 sd.default.samplerate = 16000
 sd.default.channels   = 1
 
@@ -440,12 +440,12 @@ class EmotionApp(QWidget):
         try:
             # ===== VAD-based capture (natural utterance) =====
             y, sr = self.vadrec.capture()
-            if SAVE_DEBUG_WAV:
-                try:
-                    wavwrite("debug_last.wav", sr, (np.clip(y, -1, 1) * 32767).astype(np.int16))
-                    print("[DEBUG] wrote debug_last.wav")
-                except Exception:
-                    traceback.print_exc()
+            # if SAVE_DEBUG_WAV:
+            #     try:
+            #         wavwrite("debug_last.wav", sr, (np.clip(y, -1, 1) * 32767).astype(np.int16))
+            #         print("[DEBUG] wrote debug_last.wav")
+            #     except Exception:
+            #         traceback.print_exc()
 
             amp = float(np.max(np.abs(y))); secs = len(y)/float(sr)
             print(f"[REC] amp={amp:.3f}, secs={secs:.2f}, sr={sr}")
