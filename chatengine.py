@@ -6,15 +6,18 @@ import librosa, sounddevice as sd, pyttsx3
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
+from faster_whisper import WhisperModel
+from scipy.io.wavfile import write as wavwrite
 
-# ---- TUNABLES (safer, more forgiving) ----
-USE_ASR_GATE = True                 # set False to disable word-count gate
-AMP_MIN = 0.08                      # min peak amplitude to consider "audible"
-NON_SILENT_MIN_SEC = 0.9            # was 1.2 — easier to pass for short turns
-SPLIT_TOP_DB = 30                   # was 28 — a bit less aggressive
-ASR_MIN_WORDS = 2                   # was 3 — allow short phrases
+# ---- TUNABLES ----
+USE_ASR_GATE = False                 # set False to disable word-count gate
+AMP_MIN = 0.035                      # min peak amplitude to consider "audible"
+NON_SILENT_MIN_SEC = 0.5             # easier threshold for short turns
+SPLIT_TOP_DB = 30                    # silence splitter aggressiveness
+ASR_MIN_WORDS = 2                    # allow short phrases
 sd.default.samplerate = 16000
 sd.default.channels = 1
+FIRST_TURN_EMO_ONLY = False          # keep False for API-driven replies every turn
 
 # --- Project modules ---
 from config import FEATURE_SETTINGS, RESPONSES
@@ -25,7 +28,6 @@ import onnxruntime as ort
 import google.generativeai as genai
 from dataclasses import dataclass, field
 from typing import List, Dict
-from scipy.io.wavfile import write as wavwrite
 
 # ---------------- Files & loading ----------------
 MODELS_DIR = "models"
@@ -77,99 +79,131 @@ def _supportive_fallback(user_text: str, emotion: str) -> str:
     if emotion == "happy": return f"That’s lovely to hear about “{s}”. What made it feel so good?"
     return "I want to make sure I understood. Could you say that again in a few words?"
 
-# ---- Optional Vosk ASR gate ----
+def _smoke_test_gemini(model_name: str) -> bool:
+    try:
+        import google.generativeai as genai
+        print("[GEMINI] sdk_version:", getattr(genai, "__version__", "unknown"))
+        gm = genai.GenerativeModel(model_name)
+        r = gm.generate_content("Say: PONG")
+        print("[GEMINI] smoke:", (r.text or "").strip())
+        return True
+    except Exception as e:
+        print("[GEMINI] smoke FAILED:", repr(e))
+        return False
+
+def _pick_gemini_model(api_key: str) -> str:
+    # Configure first so list_models works
+    genai.configure(api_key=api_key)
+    try:
+        models = list(genai.list_models())
+        names = [
+            getattr(m, "name", "")
+            for m in models
+            if "generateContent" in getattr(m, "supported_generation_methods", [])
+        ]
+        # Prefer stable flash models
+        for pref in ("models/gemini-2.5-flash", "models/gemini-2.0-flash",
+                     "gemini-flash-latest", "models/gemini-pro-latest"):
+            if pref in names:
+                print("[GEMINI] selected:", pref)
+                return pref
+        if names:
+            print("[GEMINI] selected (first):", names[0])
+            return names[0]
+    except Exception as e:
+        print("[GEMINI] list_models failed after configure:", repr(e))
+    return "models/gemini-pro-latest"
+
+# ---- Faster-Whisper ASR ----
 class LocalASR:
-    def __init__(self, model_dir="models/vosk_en"):
-        from vosk import Model
-        if not os.path.isdir(model_dir):
-            raise FileNotFoundError(f"Vosk model dir missing: {model_dir}")
-        self.model = Model(model_dir)
+    def __init__(self, model_dir=None):
+        # "base.en" is a good balance; use "tiny.en" for very slow CPUs
+        self.model = WhisperModel("base.en", device="cpu", compute_type="int8")
 
     def transcribe(self, y: np.ndarray, sr: int) -> str:
-        import numpy as np, librosa
-        from vosk import KaldiRecognizer
-        # 1) mono 16 kHz
+        # 1) mono 16k
         if y.ndim > 1:
             y = y[:,0]
         if sr != 16000:
             y = librosa.resample(y, orig_sr=sr, target_sr=16000)
             sr = 16000
-        # 2) pre-emphasis + trim + normalize + soft gate
-        y = librosa.effects.preemphasis(y, zi=None, coef=0.97)
-        yt, _ = librosa.effects.trim(y, top_db=25)
-        if len(yt) > 0.25 * sr:
-            y = yt
-        y = librosa.util.normalize(y, axis=0)
-        gate = 0.015
-        y = np.where(np.abs(y) < gate, 0.0, y)
-        # 3) Vosk
-        rec = KaldiRecognizer(self.model, sr)
-        pcm = (np.clip(y, -1, 1) * 32767).astype(np.int16).tobytes()
-        step = 32000
-        for i in range(0, len(pcm), step):
-            rec.AcceptWaveform(pcm[i:i+step])
-        import json as pyjson
-        try:
-            txt = pyjson.loads(rec.FinalResult()).get("text","").strip()
-        except Exception:
-            txt = ""
-        return " ".join(txt.split())
+        # 2) normalize only (no hard gates)
+        y = librosa.util.normalize(y.astype(np.float32), axis=0)
+        # 3) transcribe with VAD
+        segments, _ = self.model.transcribe(
+            y, language="en", vad_filter=True, vad_parameters={"min_silence_duration_ms": 200}
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return " ".join(text.split())
 
 # ---- Minimal chat memory ----
 @dataclass
 class ChatHistory:
-    messages: List[Dict[str,str]] = field(default_factory=list)
-    def add_user(self, t:str): self.messages.append({"role":"user","content":t})
-    def add_assistant(self, t:str): self.messages.append({"role":"assistant","content":t})
-    def as_prompt(self)->str:
-        if not self.messages:
-            return "Assistant:"
+    messages: List[Dict[str, str]] = field(default_factory=list)
+    def add_user(self, t: str): self.messages.append({"role": "user", "content": t})
+    def add_assistant(self, t: str): self.messages.append({"role": "assistant", "content": t})
+    def last_user(self) -> str:
+        for m in reversed(self.messages):
+            if m.get("role") == "user":
+                return m.get("content","")
+        return ""
+    def as_prompt(self, last: int = 3) -> str:  # keep context tiny to avoid token limit
+        msgs = self.messages[-last:] if last else self.messages
+        if not msgs: return "Assistant:"
         return "\n".join(
-            ("User: " + m["content"]) if m["role"]=="user" else ("Assistant: " + m["content"])
-            for m in self.messages
+            ("User: " + m["content"]) if m["role"] == "user" else ("Assistant: " + m["content"])
+            for m in msgs
         ) + "\nAssistant:"
 
-# ---- Gemini client ----
+# ---- Gemini helpers ----
+def _resp_text_and_finish(resp):
+    text = ""
+    finish = None
+    # Try quick accessor
+    try:
+        text = (getattr(resp, "text", "") or "").strip()
+    except Exception:
+        text = ""
+    # Fallback to parts
+    if not text and getattr(resp, "candidates", None):
+        cand = resp.candidates[0]
+        finish = getattr(cand, "finish_reason", None)
+        parts = getattr(getattr(cand, "content", None), "parts", []) or []
+        text = "".join(getattr(p, "text", "") for p in parts if getattr(p, "text", None)).strip()
+    return text, finish
+
 class GeminiClient:
     def __init__(self, model: str, api_key: str):
         if not api_key:
             raise RuntimeError("Gemini API key missing. Add it to secrets.json.")
         genai.configure(api_key=api_key)
-        self.model_name = model or "gemini-1.5-flash"
+        self.model_name = model
 
-    def generate(self, system_prompt: str, emotion_hint: str, history: ChatHistory, max_tokens: int=220) -> str:
-        # Construct model with system instruction
-        gm = genai.GenerativeModel(
-            model_name=self.model_name,
-            system_instruction=(
-                system_prompt + "\n" + emotion_hint +
-                "\nKeep replies supportive and concrete. Validate feelings. "
-                "Ask at most one gentle follow-up. Avoid medical advice."
-            )
-        )
-        # Relax safety so normal wellbeing talk isn't blocked silently
-        safety = [
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUAL_CONTENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_VIOLENCE", "threshold": "BLOCK_NONE"},
-        ]
+    # returns (text, finish_reason or None)
+    def generate(self, system_prompt: str, emotion_hint: str,
+                 history: ChatHistory, max_tokens: int = 180):
         try:
-            resp = gm.generate_content(
-                history.as_prompt(),
-                generation_config={"max_output_tokens": max_tokens},
-                safety_settings=safety
+            gm = genai.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=(
+                    f"Be warm and brief (<=30 words). One gentle question at most. "
+                    f"{emotion_hint}"
+                )
             )
-            # Prefer resp.text, fallback to stitching parts
-            text = getattr(resp, "text", "") or ""
-            if not text and getattr(resp, "candidates", None):
-                parts = getattr(resp.candidates[0].content, "parts", []) or []
-                text = "".join(getattr(p, "text", "") for p in parts)
-            return (text or "").strip()
-        except Exception:
-            traceback.print_exc()
-            return ""
+            resp = gm.generate_content(
+                history.as_prompt(last=3),  # small context prevents MAX_TOKENS
+                generation_config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": 0.4,
+                    "candidate_count": 1,
+                }
+            )
+            text, finish = _resp_text_and_finish(resp)
+            print(f"[LLM] text={bool(text)} finish={finish!r}")
+            return text, finish
+        except Exception as e:
+            print("[LLM] EXC:", repr(e))
+            return "", None
 
 # ---------------- UI ----------------
 class ChatBubble(QLabel):
@@ -236,8 +270,10 @@ class EmotionApp(QWidget):
                 api_key = _load_secret_key()
                 if not api_key:
                     print("[WARN] Gemini API key missing (GEMINI_API_KEY not found in secrets.json)")
-                self.llm = GeminiClient(model="gemini-1.5-flash", api_key=api_key)
-                print("[BOOT] Gemini client ready")
+                picked = _pick_gemini_model(api_key)
+                self.llm = GeminiClient(model=picked, api_key=api_key)
+                print("[BOOT] Gemini client ready", picked)
+                _smoke_test_gemini(picked)
             except Exception as e:
                 print("[WARN] Gemini not ready:", e)
                 self.llm = None
@@ -253,6 +289,7 @@ class EmotionApp(QWidget):
 
             calib_path=os.path.join(track["dir"], "calibration.json")
             self.calib.update(_read_json(calib_path, {}))
+            self.calib["record_seconds"] = max(4.5, float(self.calib.get("record_seconds", 3.0)))
             temp=_read_json(os.path.join(track["dir"], "temperature.json"), {"temperature":1.0})
             self.temperature=float(temp.get("temperature",1.0))
             self.classes=_read_json(calib_path, {}).get("classes", self.classes)
@@ -271,10 +308,10 @@ class EmotionApp(QWidget):
                 warnings.filterwarnings("ignore", "`clean_up_tokenization_spaces`.*")
                 from ssl_frontend import SSLFrontend; self.ssl=SSLFrontend()
 
-            # ASR + Gemini (best-effort)
+            # ASR
             try:
-                self.asr = LocalASR("models/vosk_en")
-                print("[BOOT] ASR ready (Vosk)")
+                self.asr = LocalASR()
+                print("[BOOT] ASR ready (Faster-Whisper base.en int8)")
             except Exception as e:
                 print("[WARN] ASR not ready:", e)
                 self.asr = None
@@ -331,7 +368,7 @@ class EmotionApp(QWidget):
         QApplication.processEvents()
 
         try:
-            # -------- 1) Record fixed 3s audio --------
+            # -------- 1) Record fixed-duration audio --------
             sr = FEATURE_SETTINGS.get("sample_rate", 16000)
             dur = float(self.calib.get("record_seconds", 3.0))
             y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
@@ -339,10 +376,13 @@ class EmotionApp(QWidget):
             y = y.flatten()
 
             # Save last capture for debugging
-            wavwrite("debug_last.wav", sr, (np.clip(y, -1, 1) * 32767).astype(np.int16))
-            print("[DEBUG] wrote debug_last.wav")
+            try:
+                wavwrite("debug_last.wav", sr, (np.clip(y, -1, 1) * 32767).astype(np.int16))
+                print("[DEBUG] wrote debug_last.wav")
+            except Exception:
+                traceback.print_exc()
 
-            # -------- 2) Basic audibility gate --------
+            # -------- 2) Audibility + non-silent check --------
             amp = float(np.max(np.abs(y)))
             print(f"[REC] amp={amp:.3f}, dur={dur:.2f}s, sr={sr}")
             if amp < AMP_MIN:
@@ -359,47 +399,38 @@ class EmotionApp(QWidget):
                 _speak_async(msg, self._finish)
                 return
 
-            # Optional quick user bubble showing that we captured audio
-            # (We’ll still add the real transcript below)
+            # quick visual tick
             self._add_msg("🎤 (audio captured)", is_user=True)
             QApplication.processEvents()
 
-            # -------- 3) Emotion inference (ALWAYS runs) --------
+            # -------- 3) Emotion inference --------
             feats = self._feat_ssl(y, sr) if self.model_type == "ssl" else self._feat_mfcc(y, sr)
             x = feats[np.newaxis, :, :].astype("float32")
             logits = self.session.run(None, {self.input_name: x})[0][0]
             probs = softmax(logits / max(1e-6, float(self.temperature)))
-            label = self._decode(probs)  # "happy", "sad", or "Uncertain"
+            label = self._decode(probs)
             print(f"[EMO] {label}")
 
-            # -------- 4) Transcribe (if ASR available) --------
+            # -------- 4) Transcribe (no hard return on empty) --------
             user_text = ""
             if self.asr is not None:
                 user_text = self.asr.transcribe(y, sr) or ""
                 print(f"[ASR] {user_text!r}")
 
-                if USE_ASR_GATE:
-                    if len(user_text.split()) < ASR_MIN_WORDS:
-                        msg = "I didn’t catch that clearly. Could you try once more?"
-                        self._add_msg(msg, is_user=False)
-                        _speak_async(msg, self._finish)
-                        return
-                else:
-                    if len(user_text.strip()) == 0:
-                        msg = "I didn’t hear any speech. When you’re ready, try sharing one sentence."
-                        self._add_msg(msg, is_user=False)
-                        _speak_async(msg, self._finish)
-                        return
+                if USE_ASR_GATE and len(user_text.split()) < ASR_MIN_WORDS and user_text.strip():
+                    self._add_msg("Could you say that one more time in a sentence?", is_user=False)
 
-                # Show the transcript as the real user bubble
-                if user_text:
+                if user_text.strip():
                     self._add_msg(user_text, is_user=True)
                     self.history.add_user(user_text)
+                else:
+                    # NO EARLY RETURN — add neutral marker and still go to LLM
+                    self._add_msg("I didn’t catch words—try one short sentence?", is_user=False)
+                    self.history.add_user("(User spoke; transcript unavailable.)")
             else:
-                # No ASR available: still move forward with a neutral cue
                 self.history.add_user("(User spoke; transcript unavailable.)")
 
-            # -------- 5) Tone hint for LLM (style only) --------
+            # -------- 5) Tone hint for LLM --------
             system_prompt = (
                 "You are a brief, warm companion. Keep replies to 1–2 short sentences, "
                 "validate feelings, and ask at most one gentle follow-up. Avoid medical advice."
@@ -410,21 +441,25 @@ class EmotionApp(QWidget):
                 "Detected emotion: uncertain. Ask for a simple clarification."
             )
 
-            # -------- 6) Generate reply (fallback safe) --------
+            # -------- 6) Generate reply (no duplicate prefixes) --------
+            bot_text, finish = "", None
             if self.llm is not None:
-                try:
-                    bot_text = self.llm.generate(system_prompt, emotion_hint, self.history, max_tokens=200)
-                    if not bot_text:
-                        bot_text = RESPONSES.get(label, "I'm here with you.")
-                except Exception:
-                    traceback.print_exc()
-                    bot_text = RESPONSES.get(label, "I'm here with you.")
+                bot_text, finish = self.llm.generate(system_prompt, emotion_hint, self.history, max_tokens=180)
+
+            if not bot_text:
+                # true minimal fallback if LLM returns empty
+                emotion_short = "sad" if label == "sad" else "happy" if label == "happy" else "uncertain"
+                bot_text = _supportive_fallback(user_text, emotion_short)
             else:
-                bot_text = RESPONSES.get(label, "I'm here with you.")
+                # add a single, lightweight cue ONCE
+                cue = {"sad": "I’m hearing sadness. ",
+                       "happy": "You sound positive. "}.get(label, "")
+                bot_text = cue + bot_text
 
             self._add_msg(bot_text, is_user=False)
             self.history.add_assistant(bot_text)
             _speak_async(bot_text, self._finish)
+
             print(f"[STATE] asr={'yes' if self.asr else 'no'}, llm={'yes' if self.llm else 'no'}")
 
         except Exception:
