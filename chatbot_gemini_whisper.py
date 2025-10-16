@@ -8,7 +8,7 @@ from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
 from faster_whisper import WhisperModel
 from scipy.io.wavfile import write as wavwrite
-
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 # ---- TUNABLES ----
 USE_ASR_GATE = False                 # set False to disable word-count gate
 AMP_MIN = 0.035                      # min peak amplitude to consider "audible"
@@ -17,7 +17,7 @@ SPLIT_TOP_DB = 30                    # silence splitter aggressiveness
 ASR_MIN_WORDS = 2                    # allow short phrases
 sd.default.samplerate = 16000
 sd.default.channels = 1
-FIRST_TURN_EMO_ONLY = False          # keep False for API-driven replies every turn
+FIRST_TURN_EMO_ONLY = True          # keep False for API-driven replies every turn
 
 # --- Project modules ---
 from config import FEATURE_SETTINGS, RESPONSES
@@ -197,14 +197,35 @@ class GeminiClient:
 
         user_text = pick_last_user(history)
 
-        # single-turn prompt (more reliable with 2.5 flash)
-        prompt = (
-            f"{system_prompt}\n{emotion_hint}\n\n"
-            f'User said: "{user_text}".\n'
-            "Reply in <=30 words, warm and validating. Ask at most one gentle question. No lists."
-        )
+        want_action = any(k in user_text.lower() for k in (
+            "how can i", "what can i", "suggestion", "how do i",
+            "help me", "overcome", "cope", "deal with", "fix"
+        ))
 
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        extra_rule = (
+            " If the user asks for help or 'how to', start with ONE practical, low-effort step they can try today, "
+            "then ask at most one gentle follow-up. Avoid medical/clinical advice."
+        ) if want_action else ""
+
+        try:
+            context = history.as_prompt(last=3)  # you already defined this method
+        except Exception:
+            context = ""
+        
+        # single-turn prompt (more reliable with 2.5 flash)
+        if context:
+            prompt = (
+                f"{system_prompt}\n{emotion_hint}{extra_rule}\n\n"
+                f"Conversation so far:\n{context}\n"
+                "Keep the reply standalone and concise (<=45 words)."
+            )
+        else:
+            # your original single-turn prompt
+            prompt = (
+                f"{system_prompt}\n{emotion_hint}{extra_rule}\n\n"
+                f'User said: "{user_text}".\n'
+                "Reply in <=30 words, warm and validating. Ask at most one gentle question. No lists."
+            )
 
         safety_settings = [
             dict(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
@@ -218,6 +239,69 @@ class GeminiClient:
         ]
 
         gen_cfg = dict(max_output_tokens=max_tokens, temperature=0.4, candidate_count=1)
+
+        # ---- intent & crisis cues (based only on user_text) ----
+        text_lc = (user_text or "").lower()
+
+        # Light intent cues (generic; not content-specific)
+        want_action = any(k in text_lc for k in (
+            "how can i", "how do i", "what can i", "help me", "overcome",
+            "cope", "deal with", "fix", "improve", "get better", "suggest"
+        ))
+        wants_recs = any(k in text_lc for k in (
+            "suggest", "recommend", "ideas", "examples", "tips", "options", "resources", "advice"
+        ))
+
+        # Simple crisis flag (still keeps your normal flow; just swaps to a very short message)
+        crisis_flag = any(k in text_lc for k in (
+            "suicide", "kill myself", "end my life", "self-harm", "self harm",
+            "hurt myself", "want to die", "don't want to live"
+        ))
+
+        # Core guidelines tuned for mild mental health use; emotion_hint will be "happy"/"sad"/"uncertain"
+        guidelines = [
+            "Be warm, non-judgmental, and trauma-informed.",
+            "First, briefly validate the feeling.",
+            "Keep the reply concise (≤35 words).",
+            "Ask at most one gentle, open question that supports autonomy.",
+            "Avoid medical or clinical advice and any diagnosis.",
+            "Avoid platitudes and avoid repeating the detected emotion label verbatim.",
+        ]
+        if want_action:
+            guidelines.insert(2, "Offer one tiny, low-effort step the user could try today.")
+        if wants_recs:
+            guidelines.insert(2, "If the user asks for suggestions, give one or two simple, tailored options.")
+
+        guidelines_text = "\n- " + "\n- ".join(guidelines)
+
+        # --- Build prompt (crisis → ultra brief; else normal empathetic flow) ---
+        if crisis_flag:
+            prompt = (
+                f"{system_prompt}\n"
+                "Respond with a brief, compassionate crisis-safe message:\n"
+                "- Acknowledge the pain and thank them for sharing.\n"
+                "- Encourage immediate support from a trusted person or local emergency services if in danger.\n"
+                "- One sentence maximum and no clinical advice.\n\n"
+                f'User said: "{user_text}"\n'
+                "Assistant:"
+            )
+        else:
+            prompt = (
+                f"{system_prompt}\n{emotion_hint}\n"
+                f"{guidelines_text}\n\n"
+                f'User said: "{user_text}"\n'
+                "Assistant:"
+            )
+
+        # --- decoding (slightly more natural but still short/safe) ---
+        gen_cfg = dict(
+            max_output_tokens=max_tokens,
+            temperature=0.5,
+            top_p=0.85,
+            top_k=40,
+            candidate_count=1,
+            stop_sequences=["\nUser:", "\nAssistant:"]
+        )
 
         def try_name(name: str):
             gm = genai.GenerativeModel(model_name=name, system_instruction=None)
@@ -306,7 +390,8 @@ class EmotionApp(QWidget):
         self.has_started_chat=False; self.asr=None; self.llm=None; self.history=ChatHistory()
         self.stop_words={"stop","pause","that's all","thats all","no thanks","not now"}
         self.turn=0
-
+        self.did_emotion_cue = False
+        self.last_label = None
         self._auto_load_model()
 
     def _add_msg(self, text, is_user=False):
@@ -465,8 +550,17 @@ class EmotionApp(QWidget):
             logits = self.session.run(None, {self.input_name: x})[0][0]
             probs = softmax(logits / max(1e-6, float(self.temperature)))
             label = self._decode(probs)
+            if label != self.last_label:
+                self.did_emotion_cue = False
+                self.last_label = label
             print(f"[EMO] {label}")
 
+            if FIRST_TURN_EMO_ONLY and not self.has_started_chat:
+                reply = RESPONSES.get(label, "I'm here with you.")
+                self._add_msg(reply, is_user=False)
+                self.has_started_chat = True
+                _speak_async(reply, self._finish)
+                return
             # -------- 4) Transcribe (no hard return on empty) --------
             user_text = ""
             if self.asr is not None:
@@ -513,10 +607,11 @@ class EmotionApp(QWidget):
                 emo_word = "sad" if label == "sad" else "happy" if label == "happy" else "uncertain"
                 bot_text = f"I’m hearing {emo_word}. I’m here with you. What would help most right now?"
             else:
-                # add a single, lightweight cue ONCE
-                cue = {"sad": "I’m hearing sadness. ",
-                       "happy": "You sound positive. "}.get(label, "")
-                # bot_text = cue + bot_text
+                if bot_text and not self.did_emotion_cue:
+                    cue = {"sad": "I’m hearing sadness. ",
+                        "happy": "You sound positive. "}.get(label, "")
+                    bot_text = cue + bot_text
+                    self.did_emotion_cue = True
 
             self._add_msg(bot_text, is_user=False)
             self.history.add_assistant(bot_text)
