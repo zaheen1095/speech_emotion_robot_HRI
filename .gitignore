@@ -1,13 +1,15 @@
-datasets/
+
 __pycache__/
 runs/
 runs_backup/
-
+.git/objects/01
 models/vosk-model-en-us-0.22/
-# models/vosk_en/
+models/vosk_en/
 # secrets.json
-
+datasets/
 debug_last.wav
 /session_log.csv
 
 **/session_log.csv
+datasets/ 
+datasets/augmented_audio/ 
