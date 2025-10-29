@@ -17,6 +17,6 @@ matplotlib==3.10.0
 torchaudio==2.3.1+cpu
 noisereduce==3.0.3
 tensorboard==2.20.0
-audiomentations==0.20.0
+audiomentations==0.33.0
 
 
