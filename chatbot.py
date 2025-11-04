@@ -5,7 +5,7 @@ import librosa, sounddevice as sd, pyttsx3
 import soundfile as sf
 import requests
 import onnxruntime as ort
-
+from io import BytesIO   # add for pepper
 from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -13,8 +13,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
 )
 import time
+from extract_features import extract_mfcc
 # --- Project modules ---
-from config import FEATURE_SETTINGS, RESPONSES
+from config import FEATURE_SETTINGS, RESPONSES, PEPPER 
+
 try:
     from config import ASSISTANT_STYLE
 except Exception:
@@ -22,7 +24,13 @@ except Exception:
         "You are a friendly, everyday wellbeing companion for mild support. "
         "Keep replies warm, natural, and brief (1–2 short sentences). No diagnosis or clinical terms."
     )
-from extract_features import extract_mfcc
+
+# 2) Import PepperClient separately so it never gets swallowed
+try:
+    from pepper_client import PepperClient
+except Exception:
+    PepperClient = None
+
 # from ssl_frontend import SSLFrontend  # used only if SSL model found
 
 # ==== Runtime tweaks (Windows OpenMP noise) ====
@@ -193,7 +201,7 @@ class EmotionApp(QWidget):
     sig_finish  = pyqtSignal()
     def __init__(self):
         super().__init__()
-    
+        self.pepper = None
         self.setWindowTitle("Speech Emotion Detection Application")
         self.setGeometry(100, 100, 400, 500)
         self.emotion_locked = None
@@ -242,6 +250,14 @@ class EmotionApp(QWidget):
         self.sig_finish.connect(self._finish_ui)  # ensures UI reset runs on GUI thread
 
         self._auto_load_model()
+        if PEPPER.get("enabled") and PepperClient:
+            try:
+                self.pepper = PepperClient(PEPPER["ip"], PEPPER["port"])
+                self.pepper.connect()
+                print("[Pepper] connected")
+            except Exception as e:
+                print("[Pepper] connect failed:", e)
+                self.pepper = None
 
      # --- Emotion lock helpers (INSIDE EmotionApp) ---
     def _should_decay_lock(self, minutes=7, max_turns=4):
@@ -382,6 +398,18 @@ class EmotionApp(QWidget):
         # QTimer.singleShot(0, self._finish_ui)
         self.sig_finish.emit()
 
+    def _say(self, text):
+        # Prefer Pepper’s speaker if available; fall back to local TTS
+        if self.pepper:
+            try:
+                self.pepper.tts(text)
+                self._finish()     # finish immediately; TTS happens on robot
+                return
+            except Exception:
+                traceback.print_exc()
+        _speak_async(text, self._finish)
+
+
     # ---- Main action ----
     def record_and_predict(self):
         if self.is_processing or self.session is None:
@@ -401,15 +429,35 @@ class EmotionApp(QWidget):
             # --- record (short and bounded) ---
             sr = FEATURE_SETTINGS.get("sample_rate", 16000)
             dur = float(self.calib.get("record_seconds", 3.0))
-            y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
-            sd.wait()
-            y = y.flatten()
+            
+
+            #commenting this to check for pepper 
+            # y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
+            # sd.wait()
+            # y = y.flatten()
+            
+            #add this block for the pepper testing only , if it works then good: Todo
+            if self.pepper and PEPPER.get("use_pepper_mic", False):
+                # Get WAV bytes from Pepper, decode to float32 numpy
+                raw = self.pepper.record(seconds=dur)          # bytes
+                y, sr_file = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
+                if y.ndim > 1:      # stereo -> mono
+                    y = y[:, 0]
+                print("[Audio] source:", "Pepper mic" if self.pepper and PEPPER.get("use_pepper_mic", False) else "PC mic")
+
+                if sr_file != sr:
+                    y = librosa.resample(y, orig_sr=sr_file, target_sr=sr)
+            else:
+                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
+                sd.wait()
+                y = y.flatten()
 
             # audibility gate
             if float(np.max(np.abs(y))) < float(self.calib.get("min_amp", 0.02)):
                 reply = RESPONSES.get("Uncertain", "I couldn't hear clearly. Please speak a bit closer to the mic.")
                 self._add_msg_safe(reply, is_user=False)
-                _speak_async(reply, self._finish)
+                # _speak_async(reply, self._finish)
+                self._say(reply)          # change for the pepper
                 return
 
             self._add_msg_safe("🎤 (audio captured)", is_user=True)
@@ -460,7 +508,8 @@ class EmotionApp(QWidget):
             self.turns_since_lock += 1
             self._add_msg_safe(reply, is_user=False)
             self.on_prediction(label)
-            _speak_async(reply, self._finish)
+            # _speak_async(reply, self._finish)  #commenting it 
+            self._say(reply) # add change for the pepper
 
         except KeyboardInterrupt:
             self._add_msg_safe("⏹️ cancelled.", is_user=False)

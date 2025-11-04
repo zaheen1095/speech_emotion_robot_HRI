@@ -116,3 +116,10 @@ SSL_CACHE_DIR = "ssl_cache"       # where *_ssl.npy will be written
 # config.py
 # CALIBRATION_DIR = Path("results/C3_temp_calib_C0") 
 CALIBRATION_DIR = Path("C3_calibration_SSL")
+
+PEPPER = {
+    "enabled": True,
+    "ip": "192.168.0.3",
+    "port": 7878,
+    "use_pepper_mic": False,  
+}
