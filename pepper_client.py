@@ -1,6 +1,6 @@
 # pepper_client.py
 import json, queue
-from utils import Connection
+from util.connection import Connection
 
 class PepperClient(object):
     def __init__(self, ip="192.168.0.3", port=7878, timeout=10.0):
