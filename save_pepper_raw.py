@@ -1,5 +1,5 @@
 # gui_live_predict.py
-import sys, os, json, threading, traceback, tempfile, time
+import sys, os, json, threading, traceback, tempfile,time
 import numpy as np
 import librosa, sounddevice as sd, pyttsx3
 import soundfile as sf
@@ -13,7 +13,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
 )
 from extract_features import extract_mfcc
-
 # --- Project modules ---
 from config import FEATURE_SETTINGS, RESPONSES, PEPPER
 try:
@@ -21,14 +20,14 @@ try:
 except Exception:
     ASSISTANT_STYLE = (
         "You are a friendly, everyday wellbeing companion for mild support. "
-        "Keep replies warm, natural, and brief (1–2 short sentences)(max 30 words). No diagnosis or clinical terms."
+        "Keep replies warm, natural, and brief (1–2 short sentences). No diagnosis or clinical terms."
     )
+
 
 try:
     from pepper_client import PepperClient
 except Exception:
     PepperClient = None
-
 # ==== Runtime tweaks (Windows OpenMP noise) ====
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -36,28 +35,25 @@ os.environ["OMP_NUM_THREADS"] = "1"
 # ---------------- Files & loading ----------------
 MODELS_DIR = "models"
 TRACKS = [
-    {"name": "SSL v1",  "dir": os.path.join(MODELS_DIR, "ssl_v1"),  "onnx": ["model_ssl.onnx"],                           "type": "ssl"},
+    {"name": "SSL v1",  "dir": os.path.join(MODELS_DIR, "ssl_v1"),  "onnx": ["model_ssl.onnx"],                         "type": "ssl"},
     {"name": "MFCC v1", "dir": os.path.join(MODELS_DIR, "mfcc_v1"), "onnx": ["model_mfcc.onnx", "model_mfcc_int8.onnx"], "type": "mfcc"},
 ]
 
 # ---------------- Utils ----------------
 def softmax(x):
-    x = x - np.max(x)
-    e = np.exp(x)
-    return e / e.sum()
+    x = x - np.max(x); e = np.exp(x); return e / e.sum()
 
 
 def _speak_async(text, on_done):
     def run():
         try:
             eng = pyttsx3.init()
-            eng.say(text)
-            eng.runAndWait()
+            eng.say(text); eng.runAndWait()
         except Exception:
             traceback.print_exc()
         finally:
+            # on_done()
             QTimer.singleShot(0, on_done)
-
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -67,7 +63,6 @@ def _read_json(path, default):
             return json.load(f)
     except Exception:
         return default
-
 
 def _find_existing(paths):
     for p in paths:
@@ -81,8 +76,7 @@ def _bytes_to_audio(raw: bytes, sr_hint: int = 16000):
     # WAV/AIFF?
     if len(raw) >= 12 and raw[:4] == b'RIFF' and raw[8:12] == b'WAVE':
         y, sr = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
-        if y.ndim > 1:
-            y = y[:, 0]
+        if y.ndim > 1: y = y[:, 0]
         return y, sr
 
     # Otherwise assume little-endian PCM16 mono
@@ -93,49 +87,36 @@ def _bytes_to_audio(raw: bytes, sr_hint: int = 16000):
     return y, sr_hint
 
 
-def _measure_level(y: np.ndarray):
-    """Return (peak, rms) for the audio array."""
-    if y is None or len(y) == 0:
-        return 0.0, 0.0
-    peak = float(np.max(np.abs(y)))
-    rms = float(np.sqrt(np.mean(np.square(y))))
-    return peak, rms
-
-
 class LocalASR:
-    """Windows-safe temp handling for soundfile + whisper."""
     def __init__(self, model_size="base"):
         from faster_whisper import WhisperModel
-        # base + int8 is fine on CPU
-        self.model = WhisperModel(
-            model_size,
-            device="cpu",
-            compute_type="int8",
-        )
+        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
     def transcribe(self, y, sr):
         y = np.asarray(y, dtype=np.float32).reshape(-1)
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)  # release handle
+        if y.size == 0:
+            return None
+
+        # light normalize and pad ~0.25s so short phrases aren't discarded
+        peak = float(np.max(np.abs(y)))
+        if peak > 0:
+            y = (y / peak) * 0.9
+        pad = np.zeros(int(0.25 * sr), dtype=np.float32)
+        y = np.concatenate([pad, y, pad], axis=0)
+
+        fd, path = tempfile.mkstemp(suffix=".wav"); os.close(fd)
         try:
             sf.write(path, y, sr, subtype="PCM_16")
+            # IMPORTANT: disable VAD for short/quiet Pepper clips
             segments, _ = self.model.transcribe(
-                path,
-                language="en",
-                vad_filter=True,   # back to True
-                task="transcribe",
+                path, language="en", vad_filter=False, beam_size=1
             )
             text = " ".join(s.text for s in segments).strip()
             return text or None
         finally:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
+            try: os.remove(path)
+            except Exception: pass
 
-
-
-# ---------------- LLM via Ollama (chat -> generate fallback) ----------------
 class ChatEngine:
     """
     Works with both newer (/api/chat) and older (/api/generate) Ollama servers.
@@ -143,9 +124,9 @@ class ChatEngine:
     """
     def __init__(self, model=None, host=None, debug=True):
         self.model = model or os.getenv("OLLAMA_MODEL", "llama3.1:latest")
-        self.host = (host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+        self.host  = (host  or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
         self.url_chat = f"{self.host}/api/chat"
-        self.url_gen = f"{self.host}/api/generate"
+        self.url_gen  = f"{self.host}/api/generate"
         self.system = ASSISTANT_STYLE
         self.history = []
         self.debug = debug
@@ -155,19 +136,22 @@ class ChatEngine:
         except Exception as e:
             print(f"[Ollama] ping failed: {e}")
 
+
     def _make_prompt(self, emotion: str, transcript: str | None) -> str:
+        t = (transcript or "").strip()
         return (
-            f"Emotion={emotion or 'unknown'}\n"
-            f"Transcript={transcript or '(empty)'}\n"
-            "Respond in 1–2 short, natural sentences. Avoid clinical terms."
+            f"{self.system}\n"
+            f"UserEmotion: {emotion or 'unknown'}\n"
+            f"UserSaid: {t if t else '(empty)'}\n"
+            "If UserSaid looks like a question (contains '?' or starts with: how, what, why, can, should, could), "
+            "answer it directly with 1–2 concrete suggestions. "
+            "Otherwise reply in 1–2 short, natural sentences.\n"
+            "Be specific and actionable."
         )
 
+
     def _messages(self, prompt: str):
-        return [
-            {"role": "system", "content": self.system},
-            *self.history[-8:],
-            {"role": "user", "content": prompt},
-        ]
+        return [{"role":"system","content": self.system}, *self.history[-8:], {"role":"user","content": prompt}]
 
     def _compose_text_prompt(self, prompt: str) -> str:
         # Convert system+history into a single prompt for /api/generate
@@ -181,40 +165,7 @@ class ChatEngine:
     def reply(self, emotion: str, transcript: str | None) -> str:
         prompt = self._make_prompt(emotion, transcript)
 
-        # Try /api/chat
-        try:
-            print(f"[Ollama] POST {self.url_chat} model={self.model}")
-            r = requests.post(
-                self.url_chat,
-                json={
-                    "model": self.model,
-                    "messages": self._messages(prompt),
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.6,
-                        "repeat_penalty": 1.15,
-                        "num_predict": 160,
-                    },
-                },
-                timeout=20,
-            )
-            if r.status_code == 404:
-                raise requests.HTTPError("404 chat endpoint", response=r)
-            r.raise_for_status()
-            text = (r.json().get("message", {}) or {}).get("content", "")
-            if text.strip():
-                self.history += [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": text},
-                ]
-                self.history = self.history[-12:]
-                return text.strip()
-            raise RuntimeError("empty chat response")
-        except Exception as e:
-            if self.debug:
-                print("[Ollama chat error]", repr(e))
-
-        # Fallback to /api/generate
+        # --- single fast call to /api/generate ---
         try:
             text_prompt = self._compose_text_prompt(prompt)
             print(f"[Ollama] POST {self.url_gen} model={self.model}")
@@ -227,21 +178,23 @@ class ChatEngine:
                     "options": {
                         "temperature": 0.6,
                         "repeat_penalty": 1.15,
-                        "num_predict": 160,
+                        "num_predict": 80   # short reply
                     },
                 },
-                timeout=20,
+                timeout=12,   # you can try 6–8s
             )
             r.raise_for_status()
             text = (r.json().get("response") or "").strip()
             if not text:
                 raise RuntimeError("empty generate response")
+
             self.history += [
                 {"role": "user", "content": prompt},
                 {"role": "assistant", "content": text},
             ]
             self.history = self.history[-12:]
             return text
+
         except Exception as e:
             if self.debug:
                 print("[Ollama generate error]", repr(e))
@@ -249,7 +202,6 @@ class ChatEngine:
                 "I’m having a hiccup reaching my language model. "
                 "We can keep talking, or try again shortly."
             )
-
 
 # ---------------- Chat UI ----------------
 class ChatBubble(QLabel):
@@ -260,44 +212,35 @@ class ChatBubble(QLabel):
         color = "#e0e0e0" if is_user else "#95abbe"
         self.setStyleSheet(f"background:{color}; border-radius:10px; padding:8px;")
 
-
 # ---------------- Main App ----------------
 class EmotionApp(QWidget):
     sig_add_msg = pyqtSignal(str, bool)   # text, is_user
-    sig_finish = pyqtSignal()
-
+    sig_finish  = pyqtSignal()
     def __init__(self):
-        super().__init__()
-
+        super().__init__()    #New
+        self._last_click = 0.0
         self.setWindowTitle("Speech Emotion Detection Application")
         self.setGeometry(100, 100, 400, 500)
         self.emotion_locked = None
         self.emotion_locked_at = None
         self.turns_since_lock = 0
-
         # top bar
         self.mic_icon = QLabel()
-        self.mic_off = QPixmap("mic-off.png").scaled(
-            24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.mic_on = QPixmap("mic-on.png").scaled(
-            24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
+        self.mic_off = QPixmap("mic-off.png").scaled(24,24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.mic_on  = QPixmap("mic-on.png").scaled(24,24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.mic_icon.setPixmap(self.mic_off)
 
         # Chat area
         self.chat_layout = QVBoxLayout()
         self.chat_layout.setAlignment(Qt.AlignTop)
-        container = QWidget()
-        container.setLayout(self.chat_layout)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
+        container = QWidget(); container.setLayout(self.chat_layout)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(container)
         self.scroll = scroll
 
         # Record button (single control)
-        self.button = QPushButton("Record & Detect")
+        self.button = QPushButton("🎤  Record & Detect")
         self.button.setIcon(QIcon("mic-off.png"))
+        
         self.button.setIconSize(QSize(20, 20))
         self.button.clicked.connect(self.record_and_predict)
 
@@ -306,29 +249,22 @@ class EmotionApp(QWidget):
         main.addWidget(self.mic_icon, alignment=Qt.AlignCenter)
         main.addWidget(scroll)
         main.addWidget(self.button)
-
         # Runtime state
         self.is_processing = False
         self.session = None
         self.input_name = None
         self.model_type = None       # "ssl" or "mfcc"
         self.classes = ["happy", "sad"]
-        self.calib = {
-            "mode": "threshold",
-            "sad_threshold": 0.57,
-            "min_confidence": 0.50,
-            "min_amp": 0.10,
-            "record_seconds": 3.0,
-        }
+        self.calib = {"mode":"threshold","sad_threshold":0.57,"min_confidence":0.50,"min_amp":0.1,"record_seconds":3.0}
         self.temperature = 1.0
         self.ssl = None              # SSLFrontend (lazy)
 
         # Conversation engines/state
-        self.asr = LocalASR()
+        self.asr  = LocalASR()
         self.chat = ChatEngine(debug=True)
         self.dialog_phase = "opener"   # first turn uses RESPONSES[label], then LLM
-        self.sig_add_msg.connect(self._add_msg)     # ensure _add_msg runs on GUI thread
-        self.sig_finish.connect(self._finish_ui)    # ensure UI reset runs on GUI thread
+        self.sig_add_msg.connect(self._add_msg)   # ensures _add_msg runs on GUI thread
+        self.sig_finish.connect(self._finish_ui)  # ensures UI reset runs on GUI thread
 
         self._auto_load_model()
         self.pepper = None
@@ -341,7 +277,45 @@ class EmotionApp(QWidget):
                 print("[Pepper] connect failed:", e)
                 self.pepper = None
 
-    # --- Emotion lock helpers ---
+     # --- Emotion lock helpers (INSIDE EmotionApp) ---
+
+    def _has_speech(self, y, sr):
+        if y is None:
+            return False
+        y = np.asarray(y, dtype=np.float32)
+        if y.size == 0:
+            return False
+
+        # 1) Drop Pepper relay/click
+        drop = int(0.25 * sr)
+        if y.size > drop:
+            y = y[drop:]
+
+        # --- basic stats ---
+        peak = float(np.max(np.abs(y)))
+        rms  = float(np.sqrt(np.mean(np.square(y))))
+        frame = max(1, int(0.030 * sr))
+        hop   = max(1, int(0.015 * sr))
+        zcr   = float(librosa.feature.zero_crossing_rate(
+            y, frame_length=frame, hop_length=hop
+        ).mean())
+
+        # STRONGER thresholds for Pepper
+        peak_th = 0.04   # was 0.02
+        rms_th  = 0.015  # was 0.010
+        zcr_th  = 0.030  # was 0.020
+
+        # Extra guard: 95% of samples must not be tiny
+        p95 = float(np.percentile(np.abs(y), 95))
+
+        passed = (peak >= peak_th) and (rms >= rms_th) and (zcr >= zcr_th) and (p95 >= 0.02)
+        print(f"[Gate] rms={rms:.4f} zcr={zcr:.4f} peak={peak:.4f} p95={p95:.4f} -> {'PASS' if passed else 'BLOCK'}")
+        return passed
+
+
+
+
+
     def _should_decay_lock(self, minutes=7, max_turns=4):
         if self.emotion_locked is None:
             return True
@@ -351,35 +325,26 @@ class EmotionApp(QWidget):
             return True
         return False
 
-    def _lock_emotion(self, label, probs=None):
-        """Lock only when reasonably sure, or always if probs is None (self-report override)."""
-        if probs is not None:
-            try:
-                idx = self.classes.index(label)
-                if float(probs[idx]) < 0.75:
-                    # Don't lock on low-confidence prediction
-                    return
-            except ValueError:
-                pass
+    def _lock_emotion(self, label):
         self.emotion_locked = label
         self.emotion_locked_at = time.time()
         self.turns_since_lock = 0
 
     def _say(self, text):
-        """
-        Speak without changing UI state. The worker calls self._finish()
-        when it wants to reset the button/mic.
-        """
+        def finish_on_ui():
+            QTimer.singleShot(0, self._finish)  # reset is_processing/button on GUI thread
+
         if self.pepper:
             def run():
                 try:
-                    self.pepper.tts(text)  # blocking NAOqi call
+                    self.pepper.tts(text)  # blocking call in this worker thread
                 except Exception:
                     traceback.print_exc()
+                finally:
+                    finish_on_ui()
             threading.Thread(target=run, daemon=True).start()
         else:
-            # local TTS; ignore callback, UI is handled separately
-            _speak_async(text, lambda: None)
+            _speak_async(text, finish_on_ui)
 
 
 
@@ -401,19 +366,17 @@ class EmotionApp(QWidget):
         bubble = ChatBubble(text, is_user)
         row = QHBoxLayout()
         if is_user:
-            row.addStretch()
-            row.addWidget(bubble)
+            row.addStretch(); row.addWidget(bubble)
         else:
-            row.addWidget(bubble)
-            row.addStretch()
-        f = QFrame()
-        f.setLayout(row)
+            row.addWidget(bubble); row.addStretch()
+        f = QFrame(); f.setLayout(row)
         self.chat_layout.addWidget(f)
-        sb = self.scroll.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        sb = self.scroll.verticalScrollBar(); sb.setValue(sb.maximum())
 
     def _add_msg_safe(self, text, is_user=False):
+        # QTimer.singleShot(0, lambda: self._add_msg(text, is_user))
         self.sig_add_msg.emit(text, is_user)
+
 
     # ---- Model load (auto, silent) ----
     def _auto_load_model(self):
@@ -423,25 +386,18 @@ class EmotionApp(QWidget):
                 tdir = t["dir"]
                 onnx_path = _find_existing([os.path.join(tdir, fn) for fn in t["onnx"]])
                 if onnx_path:
-                    chosen = (t, onnx_path)
-                    break
+                    chosen = (t, onnx_path); break
             if not chosen:
-                raise FileNotFoundError(
-                    "No ONNX model found in models/ssl_v1 or models/mfcc_v1."
-                )
+                raise FileNotFoundError("No ONNX model found in models/ssl_v1 or models/mfcc_v1.")
 
             track, onnx_path = chosen
             self.model_type = track["type"]
-            print(
-                f"[BOOT] Emotion backend: {self.model_type.upper()} • {os.path.basename(onnx_path)}"
-            )
+            print(f"[BOOT] Emotion backend: {self.model_type.upper()} • {os.path.basename(onnx_path)}")
 
             # load per-track calibration + optional temperature
             calib_path = os.path.join(track["dir"], "calibration.json")
             self.calib.update(_read_json(calib_path, {}))
-            temp = _read_json(
-                os.path.join(track["dir"], "temperature.json"), {"temperature": 1.0}
-            )
+            temp = _read_json(os.path.join(track["dir"], "temperature.json"), {"temperature":1.0})
             self.temperature = float(temp.get("temperature", 1.0))
 
             # classes order (optional in calibration)
@@ -449,12 +405,8 @@ class EmotionApp(QWidget):
 
             # ORT session
             so = ort.SessionOptions()
-            so.intra_op_num_threads = 1
-            so.inter_op_num_threads = 1
-            so.log_severity_level = 3
-            self.session = ort.InferenceSession(
-                onnx_path, so, providers=["CPUExecutionProvider"]
-            )
+            so.intra_op_num_threads = 1; so.inter_op_num_threads = 1; so.log_severity_level = 3
+            self.session = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
             self.input_name = self.session.get_inputs()[0].name
 
             # lazy SSL frontend if needed
@@ -478,58 +430,36 @@ class EmotionApp(QWidget):
     def _feat_mfcc(self, y, sr):
         target = FEATURE_SETTINGS.get("sample_rate", 16000)
         if sr != target:
-            y = librosa.resample(y, orig_sr=sr, target_sr=target)
-            sr = target
+            y = librosa.resample(y, orig_sr=sr, target_sr=target); sr = target
         try:
             yt, _ = librosa.effects.trim(y, top_db=30)
-            if len(yt) > int(0.25 * sr):
-                y = yt
-        except Exception:
-            pass
+            if len(yt) > int(0.25 * sr): y = yt
+        except Exception: pass
         return extract_mfcc(array=y, sr=sr)
 
     def _feat_ssl(self, y, sr):
         if sr != 16000:
-            y = librosa.resample(y, orig_sr=sr, target_sr=16000)
-            sr = 16000
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000); sr = 16000
         try:
             yt, _ = librosa.effects.trim(y, top_db=30)
-            if len(yt) > int(0.25 * sr):
-                y = yt
-        except Exception:
-            pass
+            if len(yt) > int(0.25 * sr): y = yt
+        except Exception: pass
         return self.ssl(y)
 
     # ---- Decoding (silent; no probs shown) ----
     def _decode(self, probs):
-        probs = np.asarray(probs, dtype=float)
         try:
-            idx_h = self.classes.index("happy")
-            idx_s = self.classes.index("sad")
+            idx_h = self.classes.index("happy"); idx_s = self.classes.index("sad")
         except ValueError:
             idx_h, idx_s = 0, 1
-
-        p_h = float(probs[idx_h])
-        p_s = float(probs[idx_s])
+        p_h, p_s = float(probs[idx_h]), float(probs[idx_s])
         p_max = max(p_h, p_s)
-        margin = abs(p_h - p_s)
-
-        # Strengthen confidence requirement a bit
-        min_conf = float(self.calib.get("min_confidence", 0.50))
-        min_conf = max(min_conf, 0.60)  # enforce at least 0.6
-
-        if p_max < min_conf or margin < 0.05:
+        if p_max < float(self.calib.get("min_confidence", 0.50)):
             return "Uncertain"
-
-        mode = self.calib.get("mode", "threshold")
-        sad_thr = float(self.calib.get("sad_threshold", 0.57))
-        # clamp weird thresholds (e.g., old 1.4 bug) into [0, 1]
-        sad_thr = min(max(sad_thr, 0.0), 1.0)
-
-        if mode == "threshold":
-            return "sad" if p_s >= sad_thr else "happy"
+        if self.calib.get("mode", "threshold") == "threshold":
+            return "sad" if p_s >= float(self.calib.get("sad_threshold", 0.57)) else "happy"
         return "happy" if p_h >= p_s else "sad"
-
+    
     def _finish_ui(self):
         self.mic_icon.setPixmap(self.mic_off)
         self.button.setText("🎤  Record & Detect")
@@ -539,10 +469,15 @@ class EmotionApp(QWidget):
 
     def _finish(self):
         # safe to call from any thread (worker / TTS thread)
+        # QTimer.singleShot(0, self._finish_ui)
         self.sig_finish.emit()
 
     # ---- Main action ----
     def record_and_predict(self):
+        now = time.monotonic()
+        if now - self._last_click < 0.8:
+            return
+        self._last_click = now
         if self.is_processing or self.session is None:
             return
         self.is_processing = True
@@ -554,173 +489,132 @@ class EmotionApp(QWidget):
 
         # run the heavy pipeline off the UI thread
         threading.Thread(target=self._record_and_predict_worker, daemon=True).start()
+    
+    def _clean_transcript(self, s: str | None) -> str | None:
+        if not s:
+            return None
+        t = s.strip()
+        if not t:
+            return None
+
+        # If it’s only punctuation / dots / spaces, treat as no transcript
+        if all(ch in {'.', ',', ' ', '!', '?', '-', '…'} for ch in t):
+            return None
+
+        # Require at least one alphabetic character
+        if not any(ch.isalpha() for ch in t):
+            return None
+
+        return t
+
 
     def _record_and_predict_worker(self):
         try:
             # --- record (short and bounded) ---
-            sr = FEATURE_SETTINGS.get("sample_rate", 16000)
+            sr  = FEATURE_SETTINGS.get("sample_rate", 16000)
             dur = float(self.calib.get("record_seconds", 3.0))
             use_pepper = bool(self.pepper) and bool(PEPPER.get("use_pepper_mic", False))
             print(f"[Audio] use_pepper_mic={use_pepper}")
 
             if use_pepper:
                 try:
-                    raw = self.pepper.record(
-                        seconds=int(max(1, round(dur))),
-                        mode=PEPPER.get("record_mode", "auto"),
-                    )
-                    y, sr_file = _bytes_to_audio(
-                        raw, sr_hint=int(PEPPER.get("sample_rate", 48000))
-                    )
-                    sf.write("debug_pepper.wav", y, sr_file)
-                    print("[DEBUG] saved debug_pepper.wav with sr_file =", sr_file)
+                    raw = self.pepper.record(seconds=int(max(1, round(dur))),
+                                            mode=PEPPER.get("record_mode", "seconds"))
+                    y, sr_file = _bytes_to_audio(raw, sr_hint=int(PEPPER.get("sample_rate", 16000)))
                     if sr_file != sr:
                         y = librosa.resample(y, orig_sr=sr_file, target_sr=sr)
                     print("[Audio] source: Pepper mic")
                 except Exception as e:
                     traceback.print_exc()
                     print("[Audio] Pepper record failed, falling back to PC mic:", e)
-                    y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
-                    sd.wait()
-                    y = y.flatten()
+                    y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32"); sd.wait(); y = y.flatten()
                     print("[Audio] source: PC mic")
             else:
-                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
-                sd.wait()
-                y = y.flatten()
+                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32"); sd.wait(); y = y.flatten()
                 print("[Audio] source: PC mic")
-
-            # --------------------------------------------------
-            # 1) TWO-STAGE GATE: "any audio?" and "speech strong enough?"
-            # --------------------------------------------------
-            peak, rms = _measure_level(y)
-
-            if use_pepper:
-                # Stage-1: *any* audio (very low bar)
-                basic_min_peak = float(self.calib.get("basic_min_peak", 0.02))
-                basic_min_rms  = float(self.calib.get("basic_min_rms", 0.003))
-                # Stage-2: audio we actually trust for emotion (tuned from your logs)
-                speech_min_peak = float(self.calib.get("speech_min_peak", 0.20))
-                speech_min_rms  = float(self.calib.get("speech_min_rms", 0.015))
-            else:
-                # PC mic can be more sensitive
-                basic_min_peak = float(self.calib.get("basic_min_peak", 0.02))
-                basic_min_rms  = float(self.calib.get("basic_min_rms", 0.003))
-                speech_min_peak = float(self.calib.get("speech_min_peak", 0.10))
-                speech_min_rms  = float(self.calib.get("speech_min_rms", 0.010))
-
-            print(
-                f"[Gate] peak={peak:.3f} rms={rms:.4f} "
-                f"(basic_min_peak={basic_min_peak:.3f}, basic_min_rms={basic_min_rms:.4f}, "
-                f"speech_min_peak={speech_min_peak:.3f}, speech_min_rms={speech_min_rms:.4f})"
-            )
-
-            # Stage 1: basically silence -> don't do SER at all
-            if peak < basic_min_peak and rms < basic_min_rms:
-                msg = "I couldn’t hear you clearly just now. Could you try a bit closer to the mic?"
-                self._add_msg_safe("🎤 (no clear speech)", is_user=False)
+            
+            if not self._has_speech(y, sr):
+                self._add_msg_safe("🎤 (no speech)", is_user=True)
+                msg = "I couldn't hear any speech. Please try again a bit closer."
                 self._add_msg_safe(msg, is_user=False)
                 self._say(msg)
-                self._finish() 
+                return
+            
+            # audibility gate
+            if float(np.max(np.abs(y))) < float(self.calib.get("min_amp", 0.08)):
+                reply = RESPONSES.get("Uncertain", "I couldn't hear clearly. Please speak a bit closer.")
+                self._add_msg_safe(reply, is_user=False)
+                # _speak_async(reply, self._finish)
+                self._say(reply)
                 return
 
-            # We heard something: mark that on the right side
             self._add_msg_safe("🎤 (audio captured)", is_user=True)
 
-            # --- features + SER inference ---
+            # --- features + inference ---
             feats = self._feat_ssl(y, sr) if self.model_type == "ssl" else self._feat_mfcc(y, sr)
             x = feats[np.newaxis, :, :].astype("float32")
             logits = self.session.run(None, {self.input_name: x})[0][0]
             T = max(1e-6, float(self.temperature))
             probs = softmax(logits / T)
             label = self._decode(probs)
-            print(f"[SER] probs={probs} -> label={label}")
 
-            # Stage 2: audio was there but not strong/clear enough to trust emotion
-            if peak < speech_min_peak and rms < speech_min_rms:
-                msg = (
-                    "I heard a little sound, but not clearly enough to notice how you might be "
-                    "feeling. Could you try speaking a bit closer or louder?"
-                )
-                self._add_msg_safe(msg, is_user=False)
-                self._say(msg)
-                self._finish()
-                return
-
-            # SER ran but is still uncertain about emotion
-            if label == "Uncertain":
-                msg = RESPONSES.get(
-                    "Uncertain",
-                    "I’m not quite sure how you’re feeling right now. Would you like to try again?",
-                )
-                self._add_msg_safe(msg, is_user=False)
-                self._say(msg)
-                self._finish()
-                return
-
-            # --- ASR (Whisper) ---
+            # --- ASR (robust) ---
             transcript = None
             try:
                 transcript = self.asr.transcribe(y, sr)
             except Exception:
                 traceback.print_exc()
                 transcript = None
+            finally:
+                self._add_msg_safe(transcript if transcript else "🎤 (no transcript)", is_user=True)
 
-            print(f"[ASR] raw transcript={transcript!r}")
-
-            if transcript:
-                clean = transcript.strip()
-                if len(clean) < 2:
-                    print("[ASR] transcript discarded as too short")
-                    transcript = None
-
-            print(f"[ASR] final transcript={transcript!r}")
-
-            # Show transcript / note in the chat
-            if transcript:
-                # real speech -> right side
-                self._add_msg_safe(transcript, is_user=True)
-            else:
-                # system note -> left side
-                self._add_msg_safe("🎤 (no transcript)", is_user=False)
-
-            # --- Emotion lock + text override ---
+           
+            # --- emotion locking / decay ---
             if self._should_decay_lock() and label in ("happy", "sad"):
-                self._lock_emotion(label, probs=probs)
+                self._lock_emotion(label)
 
+
+            # Self-report override from transcript
             self._maybe_override_from_text(transcript)
 
-            # Emotion we send to LLM
-            emotion_for_llm = self.emotion_locked or (
-                label if label in ("happy", "sad") else "unknown"
-            )
+            # Always use the LOCKED emotion for the LLM
+            emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
 
-            # --- Generate reply ---
-            if self.dialog_phase == "opener":
-                reply = RESPONSES.get(
-                    emotion_for_llm,
-                    RESPONSES.get(
-                        "Uncertain",
-                        "I am not sure how you are feeling. Would you like to try again.",
-                    ),
-                )
+            # --- emotion locking / decay ---
+
+            intent_direct = False
+            if transcript:
+                t = transcript.lower()
+                cues = ["how can i", "how do i", "what should i", "tips", "suggest", "overcome", "propose"]
+                intent_direct = any(c in t for c in cues)
+
+            # Always use locked emotion for context, but if user asked something specific,
+            # go straight to the LLM so it answers their question, not the canned opener.
+            emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
+
+            if intent_direct:
+                reply = self.chat.reply(emotion_for_llm, transcript)
                 self.dialog_phase = "chat"
             else:
-                reply = self.chat.reply(emotion_for_llm, transcript)
+                if self.dialog_phase == "opener":
+                    reply = RESPONSES.get(
+                        emotion_for_llm,
+                        RESPONSES.get("Uncertain", "I am not sure how you are feeling. Would you like to try again.")
+                    )
+                    self.dialog_phase = "chat"
+                else:
+                    reply = self.chat.reply(emotion_for_llm, transcript)
 
             self.turns_since_lock += 1
             self._add_msg_safe(reply, is_user=False)
-            self._say(reply)
-            self.on_prediction(label)
-            debug_path = "debug_pepper.wav"
+            debug_path = "debug_peppers.wav"
             try:
                 sf.write(debug_path, y, sr, subtype="PCM_16")
                 print(f"[DEBUG] wrote {debug_path}, shape={y.shape}, sr={sr}")
             except Exception as e:
-                print("[DEBUG] failed to write debug_pepper.wav:", e)
-            # self.on_prediction(label)
-            # self._say(reply)
-            self._finish()
+                print("[DEBUG] failed to write debug_peppers.wav:", e)
+            self.on_prediction(label)
+            self._say(reply)
 
         except KeyboardInterrupt:
             self._add_msg_safe("⏹️ cancelled.", is_user=False)
@@ -729,8 +623,7 @@ class EmotionApp(QWidget):
             traceback.print_exc()
             self._add_msg_safe("Something went wrong. Let's try again.", is_user=False)
             self._finish()
-
-
+    
     def reset_session(self):
         self.emotion_locked = None
         self.emotion_locked_at = None
@@ -739,6 +632,7 @@ class EmotionApp(QWidget):
         self.dialog_phase = "opener"
         self._add_msg_safe("🆕 New session started.", is_user=False)
 
+   
 
 # ---- Run ----
 if __name__ == "__main__":
