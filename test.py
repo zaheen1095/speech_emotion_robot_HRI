@@ -695,7 +695,7 @@
 #     sys.exit(app.exec_())
 
 
-
+#test1
 # gui_live_predict.py
 import sys, os, json, threading, traceback, tempfile, time
 import numpy as np
@@ -792,7 +792,7 @@ def _bytes_to_audio(raw: bytes, sr_hint: int = 16000):
 
 # ---------------- ASR ----------------
 class LocalASR:
-    def __init__(self, model_size="small"):
+    def __init__(self, model_size="small.en"):
         from faster_whisper import WhisperModel
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
