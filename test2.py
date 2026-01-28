@@ -103,27 +103,28 @@ def _measure_level(y: np.ndarray):
 
 
 class LocalASR:
-    """Windows-safe temp handling for soundfile + whisper."""
-    def __init__(self, model_size="base"):
+    def __init__(self, model_size="small"):  # try "small" instead of "base"
         from faster_whisper import WhisperModel
-        # base + int8 is fine on CPU
         self.model = WhisperModel(
             model_size,
             device="cpu",
-            compute_type="int8",
+            compute_type="int8",  # or "float32" if your CPU can handle it
         )
 
     def transcribe(self, y, sr):
         y = np.asarray(y, dtype=np.float32).reshape(-1)
         fd, path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)  # release handle
+        os.close(fd)
         try:
             sf.write(path, y, sr, subtype="PCM_16")
             segments, _ = self.model.transcribe(
                 path,
                 language="en",
-                vad_filter=True,   # back to True
                 task="transcribe",
+                vad_filter=True,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
             )
             text = " ".join(s.text for s in segments).strip()
             return text or None
@@ -132,6 +133,7 @@ class LocalASR:
                 os.remove(path)
             except Exception:
                 pass
+
 
 
 
@@ -159,7 +161,7 @@ class ChatEngine:
         return (
             f"Emotion={emotion or 'unknown'}\n"
             f"Transcript={transcript or '(empty)'}\n"
-            "Respond in 1–2 short, natural sentences. Avoid clinical terms."
+            "Respond in 1–2 short(max 30 words), natural sentences. Avoid clinical terms."
         )
 
     def _messages(self, prompt: str):
@@ -367,19 +369,19 @@ class EmotionApp(QWidget):
 
     def _say(self, text):
         """
-        Speak without changing UI state. The worker calls self._finish()
-        when it wants to reset the button/mic.
+        Speak without changing UI state.
+        The worker calls self._finish() AFTER this returns.
         """
         if self.pepper:
-            def run():
-                try:
-                    self.pepper.tts(text)  # blocking NAOqi call
-                except Exception:
-                    traceback.print_exc()
-            threading.Thread(target=run, daemon=True).start()
+            # 👉 BLOCKING: wait until Pepper finishes speaking
+            try:
+                self.pepper.tts(text)  # NAOqi call, runs in this worker thread
+            except Exception:
+                traceback.print_exc()
         else:
-            # local TTS; ignore callback, UI is handled separately
+            # Local PC TTS can stay async
             _speak_async(text, lambda: None)
+
 
 
 
@@ -516,7 +518,7 @@ class EmotionApp(QWidget):
 
         # Strengthen confidence requirement a bit
         min_conf = float(self.calib.get("min_confidence", 0.50))
-        min_conf = max(min_conf, 0.60)  # enforce at least 0.6
+        # min_conf = max(min_conf, 0.60)  # enforce at least 0.6
 
         if p_max < min_conf or margin < 0.05:
             return "Uncertain"
@@ -596,12 +598,15 @@ class EmotionApp(QWidget):
             peak, rms = _measure_level(y)
 
             if use_pepper:
-                # Stage-1: *any* audio (very low bar)
-                basic_min_peak = float(self.calib.get("basic_min_peak", 0.02))
-                basic_min_rms  = float(self.calib.get("basic_min_rms", 0.003))
-                # Stage-2: audio we actually trust for emotion (tuned from your logs)
-                speech_min_peak = float(self.calib.get("speech_min_peak", 0.20))
-                speech_min_rms  = float(self.calib.get("speech_min_rms", 0.015))
+                 # Stage-1: very quiet background → treat as no speech at all
+                basic_min_peak = float(self.calib.get("basic_min_peak", 0.03))
+                basic_min_rms  = float(self.calib.get("basic_min_rms", 0.004))
+
+                # Stage-2: "speech strong enough to trust emotion"
+                # Your normal speech in logs is around peak 0.17–0.35, rms 0.015–0.03,
+                # so we set these a bit lower than that.
+                speech_min_peak = float(self.calib.get("speech_min_peak", 0.12))
+                speech_min_rms  = float(self.calib.get("speech_min_rms", 0.008))
             else:
                 # PC mic can be more sensitive
                 basic_min_peak = float(self.calib.get("basic_min_peak", 0.02))
@@ -616,7 +621,7 @@ class EmotionApp(QWidget):
             )
 
             # Stage 1: basically silence -> don't do SER at all
-            if peak < basic_min_peak and rms < basic_min_rms:
+            if peak < basic_min_peak or rms < basic_min_rms:
                 msg = "I couldn’t hear you clearly just now. Could you try a bit closer to the mic?"
                 self._add_msg_safe("🎤 (no clear speech)", is_user=False)
                 self._add_msg_safe(msg, is_user=False)
@@ -637,15 +642,15 @@ class EmotionApp(QWidget):
             print(f"[SER] probs={probs} -> label={label}")
 
             # Stage 2: audio was there but not strong/clear enough to trust emotion
-            if peak < speech_min_peak and rms < speech_min_rms:
-                msg = (
-                    "I heard a little sound, but not clearly enough to notice how you might be "
-                    "feeling. Could you try speaking a bit closer or louder?"
-                )
-                self._add_msg_safe(msg, is_user=False)
-                self._say(msg)
-                self._finish()
-                return
+            # if peak < speech_min_peak and rms < speech_min_rms:
+            #     msg = (
+            #         "I heard a little sound, but not clearly enough to notice how you might be "
+            #         "feeling. Could you try speaking a bit closer or louder?"
+            #     )
+            #     self._add_msg_safe(msg, is_user=False)
+            #     self._say(msg)
+            #     self._finish()
+            #     return
 
             # SER ran but is still uncertain about emotion
             if label == "Uncertain":
@@ -677,13 +682,21 @@ class EmotionApp(QWidget):
             print(f"[ASR] final transcript={transcript!r}")
 
             # Show transcript / note in the chat
-            if transcript:
-                # real speech -> right side
-                self._add_msg_safe(transcript, is_user=True)
-            else:
-                # system note -> left side
-                self._add_msg_safe("🎤 (no transcript)", is_user=False)
+            if not transcript:
+                # self._add_msg_safe("🎤 (no transcript)", is_user=False)
+                msg = (
+                    "I heard your voice, but I couldn’t quite catch the words. "
+                    "Could you please repeat that a bit closer to the mic?"
+                )
+                self._add_msg_safe(msg, is_user=False)
+                self._say(msg)
+                self._finish()
+                return
 
+         
+            self._add_msg_safe(transcript, is_user=True)
+            
+            
             # --- Emotion lock + text override ---
             if self._should_decay_lock() and label in ("happy", "sad"):
                 self._lock_emotion(label, probs=probs)
@@ -694,6 +707,7 @@ class EmotionApp(QWidget):
             emotion_for_llm = self.emotion_locked or (
                 label if label in ("happy", "sad") else "unknown"
             )
+
 
             # --- Generate reply ---
             if self.dialog_phase == "opener":

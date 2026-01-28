@@ -121,5 +121,8 @@ PEPPER = {
     "enabled": True,
     "ip": "192.168.0.3",
     "port": 7878,
-    "use_pepper_mic": False,  
+    "use_pepper_mic": True,   # already True on your machine
+    "sample_rate": 48000,     # set 16000 (common on Pepper). If audio plays too fast/slow, try 48000.
+    "record_mode": "seconds",    # "auto" tries seconds; falls back to start/stop if needed
 }
+
