@@ -70,7 +70,7 @@ def _make_safe_app():
 
 
 # ============================
-# UNIT TESTS (Thesis §7.3)
+# UNIT TESTS
 # ============================
 class TestThesisUnitChecks(unittest.TestCase):
 

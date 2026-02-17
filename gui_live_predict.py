@@ -231,7 +231,14 @@ class EmotionApp(QWidget):
     def __init__(self):
         super().__init__()
         self._last_click = 0.0
-        self.setWindowTitle("Speech Emotion (Debug Mode)")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, "SER_Mental_Health_Robot.ico")   # or assets/app_icon.ico
+
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            print("[ICON] Not found:", icon_path)
+        self.setWindowTitle("Speech Emotion Application")
         self.setGeometry(100, 100, 420, 600)
         
         self.sig_add_msg.connect(self._add_msg)
@@ -266,7 +273,7 @@ class EmotionApp(QWidget):
         self.scroll = scroll
 
         # Button
-        self.button = QPushButton("🎤  Record & Detect")
+        self.button = QPushButton("🎤  Record and Detect")
         self.button.setMinimumHeight(50)
         self.button.setStyleSheet("QPushButton { background-color: #0078D7; color: white; font-size: 16px; border-radius: 8px; } QPushButton:disabled { background-color: #A0A0A0; }")
         self.button.clicked.connect(self.record_and_predict)
@@ -375,7 +382,7 @@ class EmotionApp(QWidget):
 
     def _finish_ui(self):
         self.mic_icon.setPixmap(self.mic_off)
-        self.button.setText("🎤  Record & Detect")
+        self.button.setText("🎤  Record and Detect")
         self.button.setEnabled(True)
         self.is_processing = False
         self.sig_update_status.emit("idle")
@@ -508,6 +515,11 @@ class EmotionApp(QWidget):
             traceback.print_exc(); self._add_msg_safe("Error processing audio.", is_user=False); self._finish()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv); w = EmotionApp(); w.show(); sys.exit(app.exec_())
+    app = QApplication(sys.argv)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(base_dir, "SER_Mental_Health_Robot.ico")  # or .ico
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    w = EmotionApp(); w.show(); sys.exit(app.exec_())
 
 
