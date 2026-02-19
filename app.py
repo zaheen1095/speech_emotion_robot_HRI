@@ -1,11 +1,272 @@
-import sys, os
-from PyQt5.QtCore import Qt, QPoint,QEvent
+# gui_live_predict_frameless.py
+# Integrated: Frameless UI (custom TitleBar) + your full SER + Pepper pipeline
+
+import sys, os, json, threading, traceback, tempfile, time
+import numpy as np
+import librosa, sounddevice as sd, pyttsx3
+import soundfile as sf
+import requests
+import onnxruntime as ort
+import scipy.signal as signal
+from io import BytesIO
+from textblob import TextBlob
+
+from PyQt5.QtCore import Qt, QEvent, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QToolButton, QSizeGrip, QStyle
+    QScrollArea, QFrame, QToolButton, QStyle, QSizeGrip
 )
 
+# --- Project modules ---
+from config import FEATURE_SETTINGS, RESPONSES, PEPPER
+from extract_features import extract_mfcc
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+DEBUG_AUDIO = False
+
+try:
+    from config import ASSISTANT_STYLE
+except Exception:
+    ASSISTANT_STYLE = (
+        "You are Pepper, a warm, empathetic robot friend. "
+        "1. If the user is sad, validate them and ASK A QUESTION. "
+        "2. Keep replies under 2 sentences. "
+    )
+
+try:
+    from pepper_client import PepperClient
+except Exception:
+    PepperClient = None
+
+try:
+    TTS_ENGINE = pyttsx3.init()
+except Exception:
+    TTS_ENGINE = None
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+USE_SENTIMENT_FUSION = True
+SENTIMENT_POS_THRESHOLD = 0.20
+SENTIMENT_NEG_THRESHOLD = -0.20
+
+BAD_PHRASES = [
+    "thank you", "thanks", "thank you for watching", "bye",
+    "subtitle", "copyright", "amara", "community", "watching"
+]
+
+MODELS_DIR = "models"
+TRACKS = [
+    {"name": "SSL v1", "dir": os.path.join(MODELS_DIR, "ssl_v1"),  "onnx": ["model_ssl.onnx"], "type": "ssl"},
+    {"name": "MFCC v1","dir": os.path.join(MODELS_DIR, "mfcc_v1"), "onnx": ["model_mfcc.onnx","model_mfcc_int8.onnx"], "type": "mfcc"},
+]
+
+# ==========================================
+# Utils
+# ==========================================
+def softmax(x):
+    x = x - np.max(x)
+    e = np.exp(x)
+    return e / e.sum()
+
+def _speak_async(text, on_done):
+    def run():
+        try:
+            if TTS_ENGINE:
+                TTS_ENGINE.say(text)
+                TTS_ENGINE.runAndWait()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            QTimer.singleShot(0, on_done)
+    threading.Thread(target=run, daemon=True).start()
+
+def _read_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def _find_existing(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+def _bytes_to_audio(raw: bytes, sr_hint: int = 16000):
+    # WAV case
+    if len(raw) >= 12 and raw[:4] == b'RIFF' and raw[8:12] == b'WAVE':
+        y, sr = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
+        if y.ndim > 1:
+            y = y[:, 0]
+        return y, int(sr)
+
+    # Raw int16 PCM case
+    a = np.frombuffer(raw, dtype=np.int16)
+    if a.size == 0:
+        raise ValueError("Pepper returned empty audio payload")
+    y = (a.astype(np.float32)) / 32768.0
+    return y, int(sr_hint)
+
+def remove_fan_noise(y, sr):
+    """High-pass (120 Hz) to remove rumble/fan noise."""
+    try:
+        sos = signal.butter(10, 120, 'hp', fs=sr, output='sos')
+        return signal.sosfilt(sos, y)
+    except Exception:
+        return y
+
+# ==========================================
+# Local ASR
+# ==========================================
+class LocalASR:
+    def __init__(self, model_size="base.en"):
+        from faster_whisper import WhisperModel
+        print(f"[ASR] Loading Whisper Model ({model_size})...")
+        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+    def transcribe(self, y, sr):
+        peak = float(np.max(np.abs(y)))
+        if peak < 0.01:
+            return None
+
+        y_norm = (y / peak) * 0.95
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            sf.write(path, y_norm, sr, subtype="PCM_16")
+            segments, _ = self.model.transcribe(
+                path, language="en", vad_filter=True, beam_size=5
+            )
+            full_text = " ".join([s.text for s in segments]).strip()
+            return full_text or None
+        except Exception:
+            return None
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+# ==========================================
+# Ollama chat engine
+# ==========================================
+class ChatEngine:
+    def __init__(self, model=None, host=None, debug=True):
+        self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+        self.host = (host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+        self.url_gen = f"{self.host}/api/generate"
+        self.system = ASSISTANT_STYLE
+        self.history = []
+        self.debug = debug
+
+    def _make_prompt(self, emotion: str, transcript: str | None) -> str:
+        t = (transcript or "").strip()
+        return (
+            f"{self.system}\n"
+            f"UserEmotion: {emotion or 'unknown'}\n"
+            f"UserSaid: {t if t else '(empty)'}\n"
+            "Respond naturally. If sad, ask a gentle question."
+        )
+
+    def _compose_text_prompt(self, prompt: str) -> str:
+        parts = [f"System: {self.system}"]
+        for m in self.history[-4:]:
+            parts.append(f"{m['role'].capitalize()}: {m['content']}")
+        parts.append(f"User: {prompt}")
+        parts.append("Assistant:")
+        return "\n".join(parts)
+
+    def reply(self, emotion: str, transcript: str | None) -> str:
+        prompt = self._make_prompt(emotion, transcript)
+
+        try:
+            text_prompt = self._compose_text_prompt(prompt)
+
+            if not self.wait_ready(timeout_s=12.0):
+                return "I am here with you. The language system is still starting. Please try again in a moment."
+        
+            if self.debug:
+                print(f"[Ollama] POST {self.url_gen}")
+                print(f"[Ollama] model {self.model}")
+
+            r = requests.post(
+                self.url_gen,
+                json={
+                    "model": self.model,
+                    "prompt": text_prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.8,
+                        "num_predict": 80,
+                    },
+                },
+                timeout=(5, 60),
+            )
+
+            if r.status_code != 200:
+                print("[Ollama] status", r.status_code)
+                print("[Ollama] body", r.text[:400])
+                return "I am here. I could not generate a reply right now."
+
+            try:
+                data = r.json()
+            except Exception:
+                print("[Ollama] JSON decode failed")
+                print("[Ollama] body", r.text[:400])
+                return "I am here. I could not generate a reply right now."
+
+            if isinstance(data, dict) and data.get("error"):
+                print("[Ollama] error", data.get("error"))
+                return "I am here. I could not generate a reply right now."
+
+            text = (data.get("response") or "").strip()
+            if not text:
+                print("[Ollama] empty response")
+                return "I am here. I could not generate a reply right now."
+
+            self.history += [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": text},
+            ]
+            self.history = self.history[-6:]
+            return text
+
+        except requests.exceptions.ConnectionError as e:
+            print("[Ollama] connection error", repr(e))
+            return "I am here. Ollama is not reachable."
+
+        except requests.exceptions.Timeout as e:
+            print("[Ollama] timeout", repr(e))
+            return "I am here. The reply took too long."
+
+        except Exception:
+            traceback.print_exc()
+            return "I am here. Could you say that again?"
+
+    def ping(self) -> bool:
+        try:
+            r = requests.get(f"{self.host}/api/tags", timeout=1.5)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def wait_ready(self, timeout_s: float = 12.0) -> bool:
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            if self.ping():
+                return True
+            time.sleep(0.4)
+        return False
+
+
+# ==========================================
+# UI Widgets
+# ==========================================
 class ChatBubble(QLabel):
     def __init__(self, text, is_user=False):
         super().__init__(text)
@@ -17,8 +278,22 @@ class ChatBubble(QLabel):
         else:
             self.setStyleSheet("background:#EAEAEA; padding:10px; border-radius:12px;")
 
+class EmojiResult(QLabel):
+    def __init__(self, emotion):
+        super().__init__()
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background: transparent;")
+        if emotion == "happy":
+            self.setText("😃")
+        elif emotion == "sad":
+            self.setText("😔")
+        else:
+            self.setText("😐")
+        self.setFont(QFont("Segoe UI Emoji", 32))
+        
+
 class TitleBar(QFrame):
-    """Custom title bar: big icon + title, mic/status, min/max/close, draggable."""
+    """Custom title bar: big icon + title, centered mic/status, window buttons, draggable."""
     def __init__(self, window, icon_path: str, title_text: str):
         super().__init__()
         self.window = window
@@ -28,13 +303,12 @@ class TitleBar(QFrame):
         self.setObjectName("TitleBar")
         ICON = 110
         self.setFixedHeight(110)
-        # self.setFixedHeight(70)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(9, 6, 9, 6)
         layout.setSpacing(10)
 
-                # Big icon (you control the size here)
+        # Big icon
         self.icon_lbl = QLabel()
         self.icon_lbl.setFixedSize(ICON, ICON)
         if os.path.exists(icon_path):
@@ -42,51 +316,49 @@ class TitleBar(QFrame):
                 ICON, ICON, Qt.KeepAspectRatio, Qt.SmoothTransformation
             ))
 
-        # Title text
+        # Title
         self.title_lbl = QLabel(title_text)
-        self.title_lbl.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
+        self.title_lbl.setFont(QFont("Poppins", 17, QFont.Bold))
         self.title_lbl.setObjectName("TitleText")
 
-        # Optional: mic + status (inside title bar)
+        # Center mic + status
         self.mic_lbl = QLabel("🎙️")
         self.mic_lbl.setFont(QFont("Segoe UI Emoji", 20))
         self.status_lbl = QLabel("😐")
         self.status_lbl.setFont(QFont("Segoe UI Emoji", 30))
 
-        # ---------------------------
-        # 3-zone alignment
-        # Left:  logo + title
-        # Center: mic + emoji (centered)
-        # Right: window buttons
-        # ---------------------------
+         # ---- blink timer for listening ----
+        self._blink_on = True
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(450)
+        self._blink_timer.timeout.connect(self._toggle_blink)
 
-        # Left group
+        # start idle look
+        self._set_idle_mic()
+
+        # ---- 3 zones ----
         left = QHBoxLayout()
         left.setSpacing(8)
         left.setContentsMargins(0, 0, 0, 0)
         left.addWidget(self.icon_lbl)
         left.addWidget(self.title_lbl)
-
         left_widget = QWidget()
         left_widget.setLayout(left)
 
-        # Center group
         center = QHBoxLayout()
         center.setSpacing(10)
         center.setContentsMargins(0, 0, 0, 0)
         center.addWidget(self.mic_lbl)
         center.addWidget(self.status_lbl)
-
         center_widget = QWidget()
         center_widget.setLayout(center)
 
-        # Add groups to main layout
-        layout.addWidget(left_widget)                        # left
-        layout.addStretch(1)                                 # push center to middle
-        layout.addWidget(center_widget, 0, Qt.AlignCenter)    # center
-        layout.addStretch(1)                                 # push buttons to right
+        layout.addWidget(left_widget)
+        layout.addStretch(1)
+        layout.addWidget(center_widget, 0, Qt.AlignCenter)
+        layout.addStretch(1)
 
-        # Drag support (clicking logo/title/mic/emoji should drag)
+        # Drag support
         self.icon_lbl.installEventFilter(self)
         self.title_lbl.installEventFilter(self)
         self.mic_lbl.installEventFilter(self)
@@ -94,13 +366,10 @@ class TitleBar(QFrame):
 
         layout.addSpacing(6)
 
-
-
-        # Window buttons (use standard icons)
+        # Window buttons
         self.btn_min = QToolButton()
         self.btn_max = QToolButton()
         self.btn_close = QToolButton()
-
         st = self.style()
         self.btn_min.setIcon(st.standardIcon(QStyle.SP_TitleBarMinButton))
         self.btn_max.setIcon(st.standardIcon(QStyle.SP_TitleBarMaxButton))
@@ -128,21 +397,39 @@ class TitleBar(QFrame):
         QToolButton:hover { background: #e9eef6; }
         QToolButton:pressed { background: #dbe6f6; }
         """)
+
         self._sync_max_button()
 
     def set_state(self, state: str):
-        # Optional helper for your pipeline
         if state == "listening":
-            self.mic_lbl.setText("🔴")
-            self.status_lbl.setText("🙂")
+            self._start_listening_blink()
+            self.status_lbl.setText("👂")
         elif state == "thinking":
-            self.mic_lbl.setText("🎙️")
+            self._set_idle_mic()
+            # self.mic_lbl.setText("🎙️")
             self.status_lbl.setText("🤔")
         else:
-            self.mic_lbl.setText("🎙️")
+            # self.mic_lbl.setText("🎙️")
+            self._set_idle_mic()
             self.status_lbl.setText("😐")
+    
+    def _set_idle_mic(self):
+        if self._blink_timer.isActive():
+            self._blink_timer.stop()
+        self.mic_lbl.setText("🎙️")
+        self.mic_lbl.setStyleSheet("color: #8a8a8a;")
+    
+    def _start_listening_blink(self):
+        self.mic_lbl.setStyleSheet("")  # normal emoji color
+        self._blink_on = True
+        self.mic_lbl.setText("🔴")
+        if not self._blink_timer.isActive():
+            self._blink_timer.start()
+    
+    def _toggle_blink(self):
+        self._blink_on = not self._blink_on
+        self.mic_lbl.setText("🔴" if self._blink_on else "⚪")
 
- 
     def _toggle_max_restore(self):
         if self.window.windowState() & Qt.WindowMaximized:
             self.window.showNormal()
@@ -156,7 +443,6 @@ class TitleBar(QFrame):
         else:
             self.btn_max.setIcon(self.style().standardIcon(QStyle.SP_TitleBarMaxButton))
 
-    # Drag window by title bar
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._mouse_pressed = True
@@ -196,23 +482,44 @@ class TitleBar(QFrame):
 
         return super().eventFilter(obj, event)
 
+# ==========================================
+# Main App (Frameless UI + Pipeline)
+# ==========================================
+class EmotionAppFrameless(QWidget):
+    sig_add_msg = pyqtSignal(str, bool)
+    sig_finish = pyqtSignal()
+    sig_add_emoji = pyqtSignal(str)
+    sig_update_status = pyqtSignal(str)
 
-class FramelessDemo(QWidget):
     def __init__(self):
         super().__init__()
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_dir, "robot_logo.png")  # big icon source
 
-        # Frameless window (no native title bar)
+        self._last_click = 0.0
+        self.is_processing = False
+        self.session = None
+        self.ssl = None
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        header_icon_path = os.path.join(base_dir, "robot_logo.png")
+        app_icon_ico = os.path.join(base_dir, "SER_Mental_Health_Robot.ico")
+
+        if os.path.exists(app_icon_ico):
+            self.setWindowIcon(QIcon(app_icon_ico))
+
+        self.setWindowTitle("Speech Emotion Application")
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setMinimumSize(860, 820)
 
-        # Outer layout
+        self.sig_add_msg.connect(self._add_msg)
+        self.sig_add_emoji.connect(self._add_emoji_bubble)
+        self.sig_update_status.connect(self.update_status_icon)
+        self.sig_finish.connect(self._finish_ui)
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(0)
 
-        # Container with border/rounded corners
         container = QFrame()
         container.setObjectName("Container")
         container.setStyleSheet("""
@@ -228,17 +535,13 @@ class FramelessDemo(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Title bar (your controlled height/icon size)
-        self.titlebar = TitleBar(self, icon_path, "Speech Emotion Application")
+        self.titlebar = TitleBar(self, header_icon_path, "Speech Emotion Application")
         layout.addWidget(self.titlebar)
 
-        # Content area
         content = QFrame()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(12, 8, 12, 8)
-        # content_layout.setSpacing(5)
 
-        # Chat area
         self.chat_layout = QVBoxLayout()
         self.chat_layout.setAlignment(Qt.AlignTop)
         self.chat_layout.setSpacing(10)
@@ -254,50 +557,351 @@ class FramelessDemo(QWidget):
         """)
         self.scroll = scroll
 
-        # Button
-        self.button = QPushButton("🎤  Record & Detect (UI demo)")
+        self.button = QPushButton("🎤  Record and Detect")
         self.button.setMinimumHeight(60)
         self.button.setStyleSheet("""
             QPushButton { background:#0078D7; color:white; font-size:16px; border-radius:10px; }
+            QPushButton:disabled { background:#A0A0A0; }
             QPushButton:pressed { background:#0b5aa0; }
         """)
-        self.button.clicked.connect(self.demo_action)
+        self.button.clicked.connect(self.record_and_predict)
 
-        # Add widgets
         content_layout.addWidget(scroll, 1)
         content_layout.addWidget(self.button)
 
-        layout.addWidget(content)
+        layout.addWidget(content, 1)
 
-        # starter message
-        self.add_msg("Hi — this is frameless UI. Now your top-left icon can be BIG.", False)
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setFixedSize(18, 18)
+        self.size_grip.raise_()
 
-    def add_msg(self, text, is_user=False):
-        bubble = ChatBubble(text, is_user=is_user)
-        row = QHBoxLayout()
-        if is_user:
-            row.addStretch(1)
-            row.addWidget(bubble)
-        else:
-            row.addWidget(bubble)
-            row.addStretch(1)
-        self.chat_layout.addLayout(row)
-        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
-    
+        self.calib = {
+            "mode": "threshold",
+            "sad_threshold": 0.57,
+            "min_confidence": 0.50,
+            "min_amp": 0.1,
+            "record_seconds": 5.0
+        }
+        self.temperature = 1.0
+        self.dialog_phase = "opener"
+
+        self.asr = LocalASR()
+        self.chat = ChatEngine(debug=True)
+
+        self._auto_load_model()
+
+        self.pepper = None
+        if PEPPER.get("enabled") and PepperClient:
+            try:
+                self.pepper = PepperClient(PEPPER["ip"], PEPPER["port"])
+                self.pepper.connect()
+            except Exception:
+                self.pepper = None
+
+        self._add_msg_safe("Welcome to Social Companion Robot. Press Record and Detect to start.", is_user=False)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        margin = 10
+        self.size_grip.move(
+            self.width() - self.size_grip.width() - margin,
+            self.height() - self.size_grip.height() - margin
+        )
+
     def changeEvent(self, e):
         if e.type() == QEvent.WindowStateChange:
             self.titlebar._sync_max_button()
         super().changeEvent(e)
 
-    def demo_action(self):
-        self.titlebar.set_state("listening")
-        self.add_msg("User: Hello", True)
-        self.titlebar.set_state("thinking")
-        self.add_msg("Assistant: I’m here. How are you feeling today?", False)
-        self.titlebar.set_state("idle")
+    def update_status_icon(self, state):
+        self.titlebar.set_state(state)
 
+    def _add_emoji_bubble(self, emotion):
+        emoji_widget = EmojiResult(emotion)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(emoji_widget)
+        row.addStretch()
+        self.chat_layout.addLayout(row)
+        self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self):
+        QApplication.processEvents()
+        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
+
+    def _add_msg_safe(self, text, is_user=False):
+        self.sig_add_msg.emit(text, is_user)
+
+    def _add_msg(self, text, is_user=False):
+        bubble = ChatBubble(text, is_user)
+        row = QHBoxLayout()
+        if is_user:
+            row.addStretch()
+            row.addWidget(bubble)
+        else:
+            row.addWidget(bubble)
+            row.addStretch()
+        self.chat_layout.addLayout(row)
+        self._scroll_to_bottom()
+
+    def _finish_ui(self):
+        self.button.setText("🎤  Record and Detect")
+        self.button.setEnabled(True)
+        self.is_processing = False
+        self.sig_update_status.emit("idle")
+
+    def _finish(self):
+        self.sig_finish.emit()
+
+    def _say(self, text):
+        def finish_on_ui():
+            QTimer.singleShot(0, self._finish)
+
+        if self.pepper:
+            def run():
+                try:
+                    self.pepper.tts(text)
+                except Exception:
+                    traceback.print_exc()
+                finally:
+                    finish_on_ui()
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            _speak_async(text, finish_on_ui)
+
+    def _auto_load_model(self):
+        try:
+            chosen = None
+            for t in TRACKS:
+                onnx_path = _find_existing([os.path.join(t["dir"], fn) for fn in t["onnx"]])
+                if onnx_path:
+                    chosen = (t, onnx_path)
+                    break
+
+            if not chosen:
+                raise FileNotFoundError("No ONNX model found in TRACKS folders.")
+
+            track, onnx_path = chosen
+            self.model_type = track["type"]
+            print(f"[BOOT] Trained emotion model(backend): {self.model_type.upper()} • {os.path.basename(onnx_path)}")
+
+            calib_path = os.path.join(track["dir"], "calibration.json")
+            self.calib.update(_read_json(calib_path, {}))
+            self.classes = _read_json(calib_path, {}).get("classes", ["happy", "sad"])
+
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1
+            so.inter_op_num_threads = 1
+            so.log_severity_level = 3
+            self.session = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
+            self.input_name = self.session.get_inputs()[0].name
+
+            inp_shape = self.session.get_inputs()[0].shape
+            if self.model_type == "ssl" and inp_shape[-1] == 45:
+                self.model_type = "mfcc"
+            if self.model_type == "mfcc" and inp_shape[-1] == 768:
+                self.model_type = "ssl"
+
+            if self.model_type == "ssl" and self.ssl is None:
+                import warnings
+                warnings.simplefilter("ignore")
+                from ssl_frontend import SSLFrontend
+                self.ssl = SSLFrontend()
+
+        except Exception:
+            traceback.print_exc()
+            self._add_msg_safe("Setup problem: model could not be loaded.", is_user=False)
+
+    def _feat_mfcc(self, y, sr):
+        if sr != 16000:
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+            sr = 16000
+        try:
+            yt, _ = librosa.effects.trim(y, top_db=30)
+            if len(yt) > int(0.25 * sr):
+                y = yt
+        except Exception:
+            pass
+        return extract_mfcc(array=y, sr=sr)
+
+    def _feat_ssl(self, y, sr):
+        if sr != 16000:
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+            sr = 16000
+        return self.ssl(y)
+
+    def record_and_predict(self):
+        now = time.monotonic()
+        if now - self._last_click < 0.8:
+            return
+        self._last_click = now
+
+        if self.is_processing or self.session is None:
+            return
+
+        self.is_processing = True
+        self.button.setEnabled(False)
+        self.button.setText("🔴  Listening…")
+        self.sig_update_status.emit("listening")
+        QApplication.processEvents()
+
+        threading.Thread(target=self._record_and_predict_worker, daemon=True).start()
+
+    def _clean_transcript(self, s: str | None) -> str | None:
+        if not s:
+            return None
+        t = s.strip()
+        t_low = t.lower()
+        if not t:
+            return None
+        for bad in BAD_PHRASES:
+            if bad in t_low:
+                return None
+        clean_text = t_low.replace(".", "").replace("!", "").replace("?", "").strip()
+        allowed_short = ["yes", "no", "hi", "hey", "ok", "sad", "bad", "mad", "joy", "cry", "wow", "fun"]
+        if len(clean_text) < 2:
+            return None
+        if len(clean_text) < 5 and clean_text not in allowed_short:
+            return None
+        return t
+
+    def _record_and_predict_worker(self):
+        try:
+            sr = int(FEATURE_SETTINGS.get("sample_rate", 16000))      # pipeline SR (your models)
+            dur = float(self.calib.get("record_seconds", 5.0))
+            use_pepper = bool(self.pepper) and bool(PEPPER.get("use_pepper_mic", False))
+
+            # ---------------- Record ----------------
+            if use_pepper:
+                try:
+                    raw = self.pepper.record(
+                        seconds=int(max(1, round(dur))),
+                        mode=PEPPER.get("record_mode", "seconds")
+                    )
+
+                    # ✅ FIX: use config sample_rate as sr_hint, NOT hardcoded 48000
+                    pepper_sr_hint = int(PEPPER.get("sample_rate", sr))
+                    y, sr_file = _bytes_to_audio(raw, sr_hint=pepper_sr_hint)
+
+                    # resample to pipeline SR
+                    if sr_file != sr:
+                        y = librosa.resample(y, orig_sr=sr_file, target_sr=sr)
+
+                except Exception:
+                    y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
+                    sd.wait()
+                    y = y.flatten()
+            else:
+                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
+                sd.wait()
+                y = y.flatten()
+
+            # ---------------- Clean (only once, using pipeline SR) ----------------
+            y = remove_fan_noise(y, sr)
+
+            # Debug save
+            if DEBUG_AUDIO:
+                ts = int(time.time())
+                fname = f"debug_audio_{ts}.wav"
+                sf.write(fname, y, sr)
+                print(f"[DEBUG] Saved processed audio to: {fname}")
+
+            peak = float(np.max(np.abs(y)))
+
+            if peak < 0.02:
+                self._add_msg_safe("🎤 (too quiet)", is_user=True)
+
+                msg = "I couldn't hear you. Please speak little loud."
+                self._add_msg_safe(msg, is_user=False)
+
+                self.sig_update_status.emit("idle")
+                self._say(msg)
+                return
+
+
+            self.sig_update_status.emit("thinking")
+
+            # ---------------- ASR ----------------
+            transcript = None
+            try:
+                raw_txt = self.asr.transcribe(y, sr)
+                print(f"[ASR raw] {raw_txt!r}")
+                transcript = self._clean_transcript(raw_txt)
+                print(f"[ASR clean] {transcript!r}")
+            except Exception:
+                transcript = None
+
+            if not transcript:
+                msg = "I heard noise, but no words."
+                self._add_msg_safe(msg, is_user=False)
+                self.sig_update_status.emit("idle")
+                self._say(msg)
+                return
+
+            self._add_msg_safe(f"You: {transcript}", is_user=True)
+
+            # ---------------- Predict ----------------
+            feats = self._feat_ssl(y, sr) if self.model_type == "ssl" else self._feat_mfcc(y, sr)
+            x = feats[np.newaxis, :, :].astype("float32")
+
+            logits = self.session.run(None, {self.input_name: x})[0][0]
+            T = max(1e-6, float(self.temperature))
+            probs = softmax(logits / T)
+
+            try:
+                idx_h = self.classes.index("happy")
+                idx_s = self.classes.index("sad")
+            except ValueError:
+                idx_h, idx_s = 0, 1
+
+            prob_happy = float(probs[idx_h])
+            prob_sad = float(probs[idx_s])
+            print(f"[AI Model] Happy={prob_happy:.2f}, Sad={prob_sad:.2f}")
+
+            audio_label = "happy" if prob_happy > prob_sad else "sad"
+
+            # ---------------- Sentiment fusion ----------------
+            final_label = audio_label
+            if USE_SENTIMENT_FUSION:
+                try:
+                    polarity = TextBlob(transcript).sentiment.polarity
+                    if polarity > SENTIMENT_POS_THRESHOLD:
+                        final_label = "happy"
+                        print(f"[Sentiment] Override HAPPY (polarity={polarity:.2f})")
+                    elif polarity < SENTIMENT_NEG_THRESHOLD:
+                        final_label = "sad"
+                        print(f"[Sentiment] Override SAD (polarity={polarity:.2f})")
+                except Exception:
+                    pass
+
+            self.sig_add_emoji.emit(final_label)
+
+            # ---------------- Reply ----------------
+            if self.dialog_phase == "opener":
+                reply = RESPONSES.get(final_label, "I am listening.")
+                self.dialog_phase = "chat"
+            else:
+                reply = self.chat.reply(final_label, transcript)
+
+            self._add_msg_safe(reply, is_user=False)
+            self._say(reply)
+
+        except Exception:
+            traceback.print_exc()
+            self._add_msg_safe("Error processing audio.", is_user=False)
+            self._finish()
+
+# ==========================================
+# Entry point
+# ==========================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    w = FramelessDemo()
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    app_icon_ico = os.path.join(base_dir, "SER_Mental_Health_Robot.ico")
+    if os.path.exists(app_icon_ico):
+        app.setWindowIcon(QIcon(app_icon_ico))
+
+    w = EmotionAppFrameless()
     w.show()
     sys.exit(app.exec_())
