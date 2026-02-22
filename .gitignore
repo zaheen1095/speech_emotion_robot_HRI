@@ -13,3 +13,4 @@ debug_last.wav
 **/session_log.csv
 datasets/ 
 datasets/augmented_audio/ 
+debug_*.wav
