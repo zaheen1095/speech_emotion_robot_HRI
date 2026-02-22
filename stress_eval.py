@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 
 from models.cnn_bilstm import CNNBiLSTM
-from config import FEATURES_DIR, CLASSES, MODEL_DIR, BATCH_SIZE, USE_ATTENTION
+from config import FEATURES_DIR, CLASSES, MODEL_DIR, BATCH_SIZE, USE_ATTENTION,FEATURES_DIR_SSL
 # reuse what your test_model already has
 from test_model import FeatureDataset, load_test_data  # <- these exist in your file
 from config import DEFAULT_TEST_DATASETS
@@ -80,7 +80,7 @@ def evaluate(model, loader, device):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", type=str, default=str(MODEL_DIR / "best_model.pt"))
+    ap.add_argument("--checkpoint", type=str, default=str(MODEL_DIR / "best_model_ssl.pt")) #here model can be replaced with the trained model (i.e., any best model)
     ap.add_argument("--results_csv", type=str, default="results/stress_summary.csv")
 
     ap.add_argument("--dataset", type=str, required=True,
@@ -92,12 +92,18 @@ def main():
                     help="Tempo/stretch factor, e.g., 0.9 or 1.1 (feature-space proxy).")
     ap.add_argument("--pitch", type=int, default=None,
                     help="Pitch shift in semitones (NOT supported in feature-space; see note).")
+    # ap.add_argument("--features_root", type=str,default=str(FEATURES_DIR), help="Root folder of features: datasets/features (MFCC) or datasets/features_ssl (SSL)") #for mfcc
+    ap.add_argument("--features_root", type=str, default=str(FEATURES_DIR_SSL),  # for ssl
+                help="datasets/features (MFCC) or datasets/features_ssl (SSL)")
+
 
     args = ap.parse_args()
 
     # --- select only the requested dataset
     selected = [args.dataset]
-    X_test, y_test = load_test_data(selected_corpora=selected)
+    # X_test, y_test = load_test_data(selected_corpora=selected)
+    X_test, y_test = load_test_data(features_root=Path(args.features_root), selected_corpora=selected)
+
 
     # infer input dim and load model
     sample_dim = infer_input_dim(X_test[0])

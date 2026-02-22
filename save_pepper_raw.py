@@ -1,22 +1,20 @@
 # gui_live_predict.py
-import sys, os, json, threading, traceback, tempfile
+import sys, os, json, threading, traceback, tempfile,time
 import numpy as np
 import librosa, sounddevice as sd, pyttsx3
 import soundfile as sf
 import requests
 import onnxruntime as ort
-from io import BytesIO   # add for pepper
+from io import BytesIO
 from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QHBoxLayout, QScrollArea, QFrame
 )
-import time
 from extract_features import extract_mfcc
 # --- Project modules ---
-from config import FEATURE_SETTINGS, RESPONSES, PEPPER 
-
+from config import FEATURE_SETTINGS, RESPONSES, PEPPER
 try:
     from config import ASSISTANT_STYLE
 except Exception:
@@ -25,14 +23,11 @@ except Exception:
         "Keep replies warm, natural, and brief (1–2 short sentences). No diagnosis or clinical terms."
     )
 
-# 2) Import PepperClient separately so it never gets swallowed
+
 try:
     from pepper_client import PepperClient
 except Exception:
     PepperClient = None
-
-# from ssl_frontend import SSLFrontend  # used only if SSL model found
-
 # ==== Runtime tweaks (Windows OpenMP noise) ====
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -48,6 +43,7 @@ TRACKS = [
 def softmax(x):
     x = x - np.max(x); e = np.exp(x); return e / e.sum()
 
+
 def _speak_async(text, on_done):
     def run():
         try:
@@ -59,6 +55,7 @@ def _speak_async(text, on_done):
             # on_done()
             QTimer.singleShot(0, on_done)
     threading.Thread(target=run, daemon=True).start()
+
 
 def _read_json(path, default):
     try:
@@ -73,28 +70,53 @@ def _find_existing(paths):
             return p
     return None
 
-# ---------------- Local ASR (Whisper) ----------------
+
+def _bytes_to_audio(raw: bytes, sr_hint: int = 16000):
+    """Return (y, sr) where y is float32 mono in [-1, 1]. Handles WAV or raw PCM16."""
+    # WAV/AIFF?
+    if len(raw) >= 12 and raw[:4] == b'RIFF' and raw[8:12] == b'WAVE':
+        y, sr = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
+        if y.ndim > 1: y = y[:, 0]
+        return y, sr
+
+    # Otherwise assume little-endian PCM16 mono
+    a = np.frombuffer(raw, dtype=np.int16)
+    if a.size == 0:
+        raise ValueError("Pepper returned empty audio payload")
+    y = (a.astype(np.float32)) / 32768.0
+    return y, sr_hint
+
+
 class LocalASR:
-    """Windows-safe temp handling for soundfile + whisper."""
     def __init__(self, model_size="base"):
         from faster_whisper import WhisperModel
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
     def transcribe(self, y, sr):
         y = np.asarray(y, dtype=np.float32).reshape(-1)
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)  # release handle so other libs can open it
+        if y.size == 0:
+            return None
+
+        # light normalize and pad ~0.25s so short phrases aren't discarded
+        peak = float(np.max(np.abs(y)))
+        if peak > 0:
+            y = (y / peak) * 0.9
+        pad = np.zeros(int(0.25 * sr), dtype=np.float32)
+        y = np.concatenate([pad, y, pad], axis=0)
+
+        fd, path = tempfile.mkstemp(suffix=".wav"); os.close(fd)
         try:
             sf.write(path, y, sr, subtype="PCM_16")
-            segments, _ = self.model.transcribe(path, language="en", vad_filter=True)
+            # IMPORTANT: disable VAD for short/quiet Pepper clips
+            segments, _ = self.model.transcribe(
+                path, language="en", vad_filter=False, beam_size=1
+            )
             text = " ".join(s.text for s in segments).strip()
             return text or None
         finally:
             try: os.remove(path)
             except Exception: pass
 
-# ---------------- LLM via Ollama ----------------
-# ---------------- LLM via Ollama (chat -> generate fallback) ----------------
 class ChatEngine:
     """
     Works with both newer (/api/chat) and older (/api/generate) Ollama servers.
@@ -114,12 +136,19 @@ class ChatEngine:
         except Exception as e:
             print(f"[Ollama] ping failed: {e}")
 
+
     def _make_prompt(self, emotion: str, transcript: str | None) -> str:
+        t = (transcript or "").strip()
         return (
-            f"Emotion={emotion or 'unknown'}\n"
-            f"Transcript={transcript or '(empty)'}\n"
-            "Respond in 1–2 short, natural sentences. Avoid clinical terms."
+            f"{self.system}\n"
+            f"UserEmotion: {emotion or 'unknown'}\n"
+            f"UserSaid: {t if t else '(empty)'}\n"
+            "If UserSaid looks like a question (contains '?' or starts with: how, what, why, can, should, could), "
+            "answer it directly with 1–2 concrete suggestions. "
+            "Otherwise reply in 1–2 short, natural sentences.\n"
+            "Be specific and actionable."
         )
+
 
     def _messages(self, prompt: str):
         return [{"role":"system","content": self.system}, *self.history[-8:], {"role":"user","content": prompt}]
@@ -136,32 +165,7 @@ class ChatEngine:
     def reply(self, emotion: str, transcript: str | None) -> str:
         prompt = self._make_prompt(emotion, transcript)
 
-        # Try /api/chat
-        try:
-            print(f"[Ollama] POST {self.url_chat} model={self.model}")
-            r = requests.post(
-                self.url_chat,
-                json={
-                    "model": self.model,
-                    "messages": self._messages(prompt),
-                    "stream": False,
-                    "options": {"temperature": 0.6, "repeat_penalty": 1.15, "num_predict": 160}
-                },
-                timeout=12
-            )
-            if r.status_code == 404:
-                raise requests.HTTPError("404 chat endpoint", response=r)
-            r.raise_for_status()
-            text = (r.json().get("message", {}) or {}).get("content", "")
-            if text.strip():
-                self.history += [{"role":"user","content":prompt},{"role":"assistant","content":text}]
-                self.history = self.history[-12:]
-                return text.strip()
-            raise RuntimeError("empty chat response")
-        except Exception as e:
-            if self.debug: print("[Ollama chat error]", repr(e))
-
-        # Fallback to /api/generate
+        # --- single fast call to /api/generate ---
         try:
             text_prompt = self._compose_text_prompt(prompt)
             print(f"[Ollama] POST {self.url_gen} model={self.model}")
@@ -171,20 +175,33 @@ class ChatEngine:
                     "model": self.model,
                     "prompt": text_prompt,
                     "stream": False,
-                    "options": {"temperature": 0.6, "repeat_penalty": 1.15, "num_predict": 160}
+                    "options": {
+                        "temperature": 0.6,
+                        "repeat_penalty": 1.15,
+                        "num_predict": 80   # short reply
+                    },
                 },
-                timeout=12
+                timeout=12,   # you can try 6–8s
             )
             r.raise_for_status()
             text = (r.json().get("response") or "").strip()
             if not text:
                 raise RuntimeError("empty generate response")
-            self.history += [{"role":"user","content":prompt},{"role":"assistant","content":text}]
+
+            self.history += [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": text},
+            ]
             self.history = self.history[-12:]
             return text
+
         except Exception as e:
-            if self.debug: print("[Ollama generate error]", repr(e))
-            return "I’m having a hiccup reaching my language model. We can keep talking, or try again shortly."
+            if self.debug:
+                print("[Ollama generate error]", repr(e))
+            return (
+                "I’m having a hiccup reaching my language model. "
+                "We can keep talking, or try again shortly."
+            )
 
 # ---------------- Chat UI ----------------
 class ChatBubble(QLabel):
@@ -200,8 +217,8 @@ class EmotionApp(QWidget):
     sig_add_msg = pyqtSignal(str, bool)   # text, is_user
     sig_finish  = pyqtSignal()
     def __init__(self):
-        super().__init__()
-        self.pepper = None
+        super().__init__()    #New
+        self._last_click = 0.0
         self.setWindowTitle("Speech Emotion Detection Application")
         self.setGeometry(100, 100, 400, 500)
         self.emotion_locked = None
@@ -223,6 +240,7 @@ class EmotionApp(QWidget):
         # Record button (single control)
         self.button = QPushButton("🎤  Record & Detect")
         self.button.setIcon(QIcon("mic-off.png"))
+        
         self.button.setIconSize(QSize(20, 20))
         self.button.clicked.connect(self.record_and_predict)
 
@@ -231,14 +249,13 @@ class EmotionApp(QWidget):
         main.addWidget(self.mic_icon, alignment=Qt.AlignCenter)
         main.addWidget(scroll)
         main.addWidget(self.button)
-        
         # Runtime state
         self.is_processing = False
         self.session = None
         self.input_name = None
         self.model_type = None       # "ssl" or "mfcc"
         self.classes = ["happy", "sad"]
-        self.calib = {"mode":"threshold","sad_threshold":0.57,"min_confidence":0.50,"min_amp":0.02,"record_seconds":3.0}
+        self.calib = {"mode":"threshold","sad_threshold":0.57,"min_confidence":0.50,"min_amp":0.1,"record_seconds":3.0}
         self.temperature = 1.0
         self.ssl = None              # SSLFrontend (lazy)
 
@@ -250,6 +267,7 @@ class EmotionApp(QWidget):
         self.sig_finish.connect(self._finish_ui)  # ensures UI reset runs on GUI thread
 
         self._auto_load_model()
+        self.pepper = None
         if PEPPER.get("enabled") and PepperClient:
             try:
                 self.pepper = PepperClient(PEPPER["ip"], PEPPER["port"])
@@ -260,6 +278,44 @@ class EmotionApp(QWidget):
                 self.pepper = None
 
      # --- Emotion lock helpers (INSIDE EmotionApp) ---
+
+    def _has_speech(self, y, sr):
+        if y is None:
+            return False
+        y = np.asarray(y, dtype=np.float32)
+        if y.size == 0:
+            return False
+
+        # 1) Drop Pepper relay/click
+        drop = int(0.25 * sr)
+        if y.size > drop:
+            y = y[drop:]
+
+        # --- basic stats ---
+        peak = float(np.max(np.abs(y)))
+        rms  = float(np.sqrt(np.mean(np.square(y))))
+        frame = max(1, int(0.030 * sr))
+        hop   = max(1, int(0.015 * sr))
+        zcr   = float(librosa.feature.zero_crossing_rate(
+            y, frame_length=frame, hop_length=hop
+        ).mean())
+
+        # STRONGER thresholds for Pepper
+        peak_th = 0.04   # was 0.02
+        rms_th  = 0.015  # was 0.010
+        zcr_th  = 0.030  # was 0.020
+
+        # Extra guard: 95% of samples must not be tiny
+        p95 = float(np.percentile(np.abs(y), 95))
+
+        passed = (peak >= peak_th) and (rms >= rms_th) and (zcr >= zcr_th) and (p95 >= 0.02)
+        print(f"[Gate] rms={rms:.4f} zcr={zcr:.4f} peak={peak:.4f} p95={p95:.4f} -> {'PASS' if passed else 'BLOCK'}")
+        return passed
+
+
+
+
+
     def _should_decay_lock(self, minutes=7, max_turns=4):
         if self.emotion_locked is None:
             return True
@@ -273,6 +329,24 @@ class EmotionApp(QWidget):
         self.emotion_locked = label
         self.emotion_locked_at = time.time()
         self.turns_since_lock = 0
+
+    def _say(self, text):
+        def finish_on_ui():
+            QTimer.singleShot(0, self._finish)  # reset is_processing/button on GUI thread
+
+        if self.pepper:
+            def run():
+                try:
+                    self.pepper.tts(text)  # blocking call in this worker thread
+                except Exception:
+                    traceback.print_exc()
+                finally:
+                    finish_on_ui()
+            threading.Thread(target=run, daemon=True).start()
+        else:
+            _speak_async(text, finish_on_ui)
+
+
 
     def _maybe_override_from_text(self, transcript: str | None):
         if not transcript:
@@ -398,20 +472,12 @@ class EmotionApp(QWidget):
         # QTimer.singleShot(0, self._finish_ui)
         self.sig_finish.emit()
 
-    def _say(self, text):
-        # Prefer Pepper’s speaker if available; fall back to local TTS
-        if self.pepper:
-            try:
-                self.pepper.tts(text)
-                self._finish()     # finish immediately; TTS happens on robot
-                return
-            except Exception:
-                traceback.print_exc()
-        _speak_async(text, self._finish)
-
-
     # ---- Main action ----
     def record_and_predict(self):
+        now = time.monotonic()
+        if now - self._last_click < 0.8:
+            return
+        self._last_click = now
         if self.is_processing or self.session is None:
             return
         self.is_processing = True
@@ -423,41 +489,63 @@ class EmotionApp(QWidget):
 
         # run the heavy pipeline off the UI thread
         threading.Thread(target=self._record_and_predict_worker, daemon=True).start()
+    
+    def _clean_transcript(self, s: str | None) -> str | None:
+        if not s:
+            return None
+        t = s.strip()
+        if not t:
+            return None
+
+        # If it’s only punctuation / dots / spaces, treat as no transcript
+        if all(ch in {'.', ',', ' ', '!', '?', '-', '…'} for ch in t):
+            return None
+
+        # Require at least one alphabetic character
+        if not any(ch.isalpha() for ch in t):
+            return None
+
+        return t
+
 
     def _record_and_predict_worker(self):
         try:
             # --- record (short and bounded) ---
-            sr = FEATURE_SETTINGS.get("sample_rate", 16000)
+            sr  = FEATURE_SETTINGS.get("sample_rate", 16000)
             dur = float(self.calib.get("record_seconds", 3.0))
-            
+            use_pepper = bool(self.pepper) and bool(PEPPER.get("use_pepper_mic", False))
+            print(f"[Audio] use_pepper_mic={use_pepper}")
 
-            #commenting this to check for pepper 
-            # y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
-            # sd.wait()
-            # y = y.flatten()
-            
-            #add this block for the pepper testing only , if it works then good: Todo
-            if self.pepper and PEPPER.get("use_pepper_mic", False):
-                # Get WAV bytes from Pepper, decode to float32 numpy
-                raw = self.pepper.record(seconds=dur)          # bytes
-                y, sr_file = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
-                if y.ndim > 1:      # stereo -> mono
-                    y = y[:, 0]
-                print("[Audio] source:", "Pepper mic" if self.pepper and PEPPER.get("use_pepper_mic", False) else "PC mic")
-
-                if sr_file != sr:
-                    y = librosa.resample(y, orig_sr=sr_file, target_sr=sr)
+            if use_pepper:
+                try:
+                    raw = self.pepper.record(seconds=int(max(1, round(dur))),
+                                            mode=PEPPER.get("record_mode", "seconds"))
+                    y, sr_file = _bytes_to_audio(raw, sr_hint=int(PEPPER.get("sample_rate", 16000)))
+                    if sr_file != sr:
+                        y = librosa.resample(y, orig_sr=sr_file, target_sr=sr)
+                    print("[Audio] source: Pepper mic")
+                except Exception as e:
+                    traceback.print_exc()
+                    print("[Audio] Pepper record failed, falling back to PC mic:", e)
+                    y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32"); sd.wait(); y = y.flatten()
+                    print("[Audio] source: PC mic")
             else:
-                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32")
-                sd.wait()
-                y = y.flatten()
-
+                y = sd.rec(int(dur * sr), samplerate=sr, channels=1, dtype="float32"); sd.wait(); y = y.flatten()
+                print("[Audio] source: PC mic")
+            
+            if not self._has_speech(y, sr):
+                self._add_msg_safe("🎤 (no speech)", is_user=True)
+                msg = "I couldn't hear any speech. Please try again a bit closer."
+                self._add_msg_safe(msg, is_user=False)
+                self._say(msg)
+                return
+            
             # audibility gate
-            if float(np.max(np.abs(y))) < float(self.calib.get("min_amp", 0.02)):
-                reply = RESPONSES.get("Uncertain", "I couldn't hear clearly. Please speak a bit closer to the mic.")
+            if float(np.max(np.abs(y))) < float(self.calib.get("min_amp", 0.08)):
+                reply = RESPONSES.get("Uncertain", "I couldn't hear clearly. Please speak a bit closer.")
                 self._add_msg_safe(reply, is_user=False)
                 # _speak_async(reply, self._finish)
-                self._say(reply)          # change for the pepper
+                self._say(reply)
                 return
 
             self._add_msg_safe("🎤 (audio captured)", is_user=True)
@@ -484,8 +572,7 @@ class EmotionApp(QWidget):
             # --- emotion locking / decay ---
             if self._should_decay_lock() and label in ("happy", "sad"):
                 self._lock_emotion(label)
-                # optional: show the detection explicitly
-                # self._add_msg_safe(f"(detected {label})", is_user=False)
+
 
             # Self-report override from transcript
             self._maybe_override_from_text(transcript)
@@ -494,22 +581,40 @@ class EmotionApp(QWidget):
             emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
 
             # --- emotion locking / decay ---
-      
-            # First turn: use RESPONSES keyed by emotion; afterwards use LLM
-            if self.dialog_phase == "opener":
-                reply = RESPONSES.get(
-                    emotion_for_llm,
-                    RESPONSES.get("Uncertain", "I am not sure how you are feeling. Would you like to try again.")
-                )
+
+            intent_direct = False
+            if transcript:
+                t = transcript.lower()
+                cues = ["how can i", "how do i", "what should i", "tips", "suggest", "overcome", "propose"]
+                intent_direct = any(c in t for c in cues)
+
+            # Always use locked emotion for context, but if user asked something specific,
+            # go straight to the LLM so it answers their question, not the canned opener.
+            emotion_for_llm = self.emotion_locked or (label if label in ("happy","sad") else "unknown")
+
+            if intent_direct:
+                reply = self.chat.reply(emotion_for_llm, transcript)
                 self.dialog_phase = "chat"
             else:
-                reply = self.chat.reply(emotion_for_llm, transcript)
+                if self.dialog_phase == "opener":
+                    reply = RESPONSES.get(
+                        emotion_for_llm,
+                        RESPONSES.get("Uncertain", "I am not sure how you are feeling. Would you like to try again.")
+                    )
+                    self.dialog_phase = "chat"
+                else:
+                    reply = self.chat.reply(emotion_for_llm, transcript)
 
             self.turns_since_lock += 1
             self._add_msg_safe(reply, is_user=False)
+            debug_path = "debug_peppers.wav"
+            try:
+                sf.write(debug_path, y, sr, subtype="PCM_16")
+                print(f"[DEBUG] wrote {debug_path}, shape={y.shape}, sr={sr}")
+            except Exception as e:
+                print("[DEBUG] failed to write debug_peppers.wav:", e)
             self.on_prediction(label)
-            # _speak_async(reply, self._finish)  #commenting it 
-            self._say(reply) # add change for the pepper
+            self._say(reply)
 
         except KeyboardInterrupt:
             self._add_msg_safe("⏹️ cancelled.", is_user=False)

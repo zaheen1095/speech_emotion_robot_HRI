@@ -59,7 +59,7 @@ def load_test_data(selected_corpora, features_root: Path):
             if file.endswith(".npy"):
                 full = str(emotion_dir / file)
                 corpus = infer_corpus_from_filename(full)
-                if (selected_corpora is None) or (corpus in selected_corpora):
+                if corpus in selected_corpora:
                     X.append(full)
                     y.append(idx)
                 # if corpus in selected_corpora:              # <-- filter here
@@ -67,8 +67,11 @@ def load_test_data(selected_corpora, features_root: Path):
                 #     y.append(idx)
 
     if not X:
+        # raise SystemExit(
+        #     f"No test features found for {selected_corpora} under {FEATURES_DIR}/test/<{','.join(CLASSES)}> (.npy)"
+        # )
         raise SystemExit(
-            f"No test features found for {selected_corpora} under {FEATURES_DIR}/test/<{','.join(CLASSES)}> (.npy)"
+            f"No test features found for {selected_corpora} under {features_root}/test/<{','.join(CLASSES)}> (.npy)"
         )
     return X, y
 
@@ -117,7 +120,7 @@ def test(checkpoint_path=None, test_datasets=None):
     model = CNNBiLSTM(input_dim=input_dim, num_classes=len(CLASSES), use_attention=USE_ATTENTION)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt_path = Path(checkpoint_path or (Path(MODEL_DIR) / "best_model.pt"))
+    ckpt_path = Path(checkpoint_path or (Path(MODEL_DIR) / "best_model_1.pt"))
     if not ckpt_path.exists():
         raise SystemExit(f"Checkpoint not found: {ckpt_path}")
 

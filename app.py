@@ -274,7 +274,7 @@ class ChatBubble(QLabel):
         self.setMaximumWidth(360)
         self.setFont(QFont("Segoe UI", 10))
         if is_user:
-            self.setStyleSheet("background:#DCF8C6; padding:15px; border-radius:12px;")
+            self.setStyleSheet("background:#DCF8C6; padding:10px; border-radius:12px;")
         else:
             self.setStyleSheet("background:#EAEAEA; padding:10px; border-radius:12px;")
 
@@ -743,7 +743,6 @@ class EmotionAppFrameless(QWidget):
         self.button.setEnabled(False)
         self.button.setText("🔴  Listening…")
         self.sig_update_status.emit("listening")
-    
         QApplication.processEvents()
 
         threading.Thread(target=self._record_and_predict_worker, daemon=True).start()
@@ -834,8 +833,7 @@ class EmotionAppFrameless(QWidget):
 
             if not transcript:
                 msg = "I heard noise, but no words."
-                self._add_msg_safe(msg, is_user=True)
-
+                self._add_msg_safe(msg, is_user=False)
                 self.sig_update_status.emit("idle")
                 self._say(msg)
                 return
