@@ -1,50 +1,48 @@
-# Speech Emotion Recognition for Mental Health Robot (Happy vs Sad)
+# Speech Emotion Recognition Component (Happy vs Sad) — CPU / ONNX
 
-This repository contains code for a speech emotion recognition (SER) component developed for a robot interaction setup.
-The classifier predicts **happy vs sad** from short speech clips. The trained model can be exported to **ONNX** and used in a CPU runtime (for example, with Pepper).
+This repository contains a **speech emotion recognition (SER) software component** developed for a robot interaction setup.
+The classifier predicts **happy vs sad** from short English speech clips. The trained model can be exported to **ONNX** and used for **CPU-only inference** (e.g., in a Pepper-based lab demo).
+
+**Important scope note:** This system predicts only a speech-based emotion label (**happy/sad**) and is used to adjust the robot’s reply style. It is **not** a clinical tool and does **not** infer mental health state.
 
 ---
 
-## Data (not included in this repository)
+## Data (not included)
 
-Audio datasets are **not uploaded** in this repository due to licensing restrictions.
-To reproduce the experiments, datasets must be downloaded from their official sources and used under their licence terms.
+Audio datasets are **not distributed** in this repository due to licensing restrictions.
+To reproduce experiments, datasets must be downloaded from their official sources and used under their licence terms.
 
-Only utterances labelled **happy** and **sad** are used. Other emotion classes are ignored to keep the task binary and consistent across corpora.
-All audio was resampled to **16 kHz mono** before feature extraction to ensure consistency across corpora.
+This project uses **only** utterances labelled **happy** and **sad**.
+All audio is resampled to **16 kHz mono** before feature extraction.
 
-### Datasets used in this project
+### Datasets used
+- CREMA-D  
+- RAVDESS  
+- TESS  
+- SAVEE  
+- JL-Corpus  
+- IEMOCAP  
 
-The experiments were conducted using the following English speech emotion corpora:
+Only **happy** and **sad** labels are retained. Other emotion classes are ignored to keep a consistent binary task.
 
-- CREMA-D
-- RAVDESS
-- TESS
-- SAVEE
-- JL-Corpus
-- IEMOCAP
+---
 
-These datasets contain acted or semi-structured emotional speech recordings.
-Only the **happy** and **sad** emotion labels were retained for this project.
-All other emotion classes were removed to maintain a binary classification setup.
+## Repository structure
 
-This repository does not redistribute any audio files.
-
-### Expected local folder structure (matches this project)
-
+### Data layout (example)
 ```text
 datasets/
-├── raw_audio/             # downloaded datasets (not included in repo)
+├── raw_audio/             # downloaded datasets (not included)
 │   ├── train/
-│   │   ├── happy/         # .wav files
-│   │   └── sad/           # .wav files
+│   │   ├── happy/
+│   │   └── sad/
 │   └── test/
-│       ├── happy/         # .wav files
-│       └── sad/           # .wav files
-├── resampled_audio/       # created by resample_audio.py (16 kHz)
+│       ├── happy/
+│       └── sad/
+├── resampled_audio/       # created by resample_audio.py (16 kHz mono)
 ├── augmented_audio/       # created by offline_augmentation.py (optional, train only)
-├── features/              # MFCC feature .npy files (extract_features.py output)
-└── features_ssl/          # SSL cached features (cache_ssl_features.py output)
+├── features/              # MFCC features (.npy) from extract_features.py
+└── features_ssl/          # cached SSL features from cache_ssl_features.py
 ```
 
 If a different layout is used (for example, dataset-wise folders), update the paths in `config.py`.
@@ -81,8 +79,7 @@ pip install -r requirements.txt
 ## Workflow (training → evaluation → deployment)
 The pipeline is run in this order:
 
-1. **Resample audio** (required)  
-Converts all audio to a consistent format (16 kHz, mono).
+1. **Resample audio to 16 kHz mono** (required)  
 ```bash
 python resample_audio.py
 ```
@@ -115,7 +112,7 @@ python test_model.py
 python export_to_onnx.py
 ```
 
-7. **Run inference(Optionl)**
+7. **Run inference (optional)**
 ```bash
 python onnx_inference.py
 ```
@@ -126,25 +123,62 @@ or
 python app.py
 ```
 
-##  Deployment
-Pepper (or another robot) is used as the interaction interface (microphone + speech output), while SER inference runs on a host computer using the ONNX model.
-Dataset audio and trained checkpoints are not distributed in this repo.
-Use `onnx_inference.py` on robot platform with audio input to recognize emotions.
+## Component behaviour
+
+### Output labels
+The SER model predicts:
+- `happy`
+- `sad`
+
+In addition, the runtime may return:
+- `uncertain`
+
+`uncertain` is **not** trained as a third class. It is generated at runtime when:
+- the input audio fails basic quality checks (e.g., too quiet / mostly silence), or
+- the model confidence is below a configured threshold.
+
+This prevents the system from forcing a label on weak or unreliable input.
 
 ---
-## One important repo submission note (based on your screenshots)
-Right now your `models/` folder contains **many** `.pt` checkpoints. They are not huge individually (~8–10 MB), but together they can make the repo heavy.
 
-For a clean submission repo, a common approach is:
+## Integration guide (use this component in another system)
 
-- keep only **one final checkpoint per track** inside `models/mfcc_v1/` and `models/ssl_v1/`
-- keep plots (`curves_*.png`) and `train_summary.json` (these are small and useful)
-- ignore the rest using `.gitignore`
+This repository is designed to work as a **loosely coupled SER component** that can be integrated into a larger robot or chatbot system.
 
-If you want, paste your current `.gitignore` (or confirm you don’t have one), and I will write the exact ignore rules for:
-- `datasets/*`
-- most `models/*.pt` except maybe “final” ones
-- caches like `__pycache__` and logs
+### Expected input
+- short speech clip
+- 16 kHz, mono waveform
+
+### Output format
+For each input turn, the component returns:
+- `label`: `"happy"`, `"sad"`, or `"uncertain"`
+- probability scores (e.g., `p_happy`, `p_sad`)
+- optional: confidence score or reason for uncertainty
+
+### Recommended method (ONNX)
+1. Load the exported ONNX model using ONNX Runtime.
+2. For each user turn:
+   - record audio
+   - apply the same preprocessing as training
+   - run ONNX inference
+   - apply the decision rule (argmax or threshold + confidence gate)
+3. Use the returned label to guide response behaviour in the host system.
+
+See `onnx_inference.py` for a reference implementation.
+
+### Alternative integration options
+- **Subprocess call:** run `onnx_inference.py` from another language and parse output.
+- **Python import:** import inference functions directly if the host system is Python-based.
+
+---
+
+## Deployment note (Pepper / robot setup)
+
+Pepper (or another robot) can be used as the interaction interface (microphone + speech output), while SER inference runs on a host computer using the exported ONNX model.
+
+- Dataset audio and trained checkpoints are not distributed in this repo.
+- Use `onnx_inference.py` (or the GUI scripts) as a reference for running inference on recorded audio.
+
 ---
 
 © 2026 – Thesis Project by Zaheen Fatima
