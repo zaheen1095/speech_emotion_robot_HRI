@@ -47,8 +47,6 @@ datasets/
 
 If a different layout is used (for example, dataset-wise folders), update the paths in `config.py`.
 
-
-## Repository structure (code and outputs)
 ```
 models/
 ├── mfcc_v1/               # MFCC track outputs (checkpoints, ONNX, configs)
@@ -178,8 +176,12 @@ Pepper (or another robot) can be used as the interaction interface (microphone +
 
 - Dataset audio and trained checkpoints are not distributed in this repo.
 - Use `onnx_inference.py` (or the GUI scripts) as a reference for running inference on recorded audio.
-
 ---
+## Integration
+
+For integration into other software systems, see `INTEGRATION_GUIDE.md`.
+---
+
 
 © 2026 – Thesis Project by Zaheen Fatima
 
