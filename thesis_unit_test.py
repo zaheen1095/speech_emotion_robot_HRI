@@ -1,6 +1,6 @@
 import sys
 import unittest
-import numpy as np
+import numpy as numpy
 import os
 from unittest.mock import MagicMock, patch
 
@@ -17,13 +17,13 @@ print(f"Testing module: {appmodule.__file__}")
 class DummyASR:
     def __init__(self, *args, **kwargs):
         pass
-    def transcribe(self, y, sr):
+    def transcribe(self, y, sample_rate_hz):
         return "I am feeling great"
 
 class DummySession:
     def run(self, *args, **kwargs):
         # return logits [happy, sad]
-        return [np.array([[5.0, 1.0]], dtype=np.float32)]
+        return [numpy.array([[5.0, 1.0]], dtype=numpy.float32)]
 
 
 def _make_safe_app():
@@ -31,9 +31,9 @@ def _make_safe_app():
 
     # Patch away: Whisper/ASR load, ONNX auto-load, Pepper robot mode
     with patch.object(appmodule, "LocalASR", DummyASR), \
-         patch.object(appmodule.EmotionApp, "_auto_load_model", lambda self: None), \
-         patch.object(appmodule, "PEPPER", pepper_cfg), \
-         patch.object(appmodule, "DEBUG_AUDIO", False, create=True):
+        patch.object(appmodule.EmotionApp, "_auto_load_model", lambda self: None), \
+        patch.object(appmodule, "PEPPER", pepper_cfg), \
+        patch.object(appmodule, "DEBUG_AUDIO", False, create=True):
 
         gui = appmodule.EmotionApp()
 
@@ -58,7 +58,7 @@ def _make_safe_app():
     gui.on_prediction = MagicMock()
 
     # Stub feature extraction (shape only)
-    gui._feat_mfcc = MagicMock(return_value=np.zeros((10, 13), dtype=np.float32))
+    gui._feat_mfcc = MagicMock(return_value=numpy.zeros((10, 13), dtype=numpy.float32))
 
     # Ensure calib exists
     if not hasattr(gui, "calib") or gui.calib is None:
@@ -75,10 +75,10 @@ def _make_safe_app():
 class TestThesisUnitChecks(unittest.TestCase):
 
     def test_softmax_logic(self):
-        logits = np.array([2.0, 1.0, 0.1])
-        probs = appmodule.softmax(logits)
-        self.assertAlmostEqual(float(np.sum(probs)), 1.0, places=6)
-        self.assertGreater(probs[0], probs[1])
+        iteration_logs = numpy.array([2.0, 1.0, 0.1])
+        probability = appmodule.softmax(iteration_logs)
+        self.assertAlmostEqual(float(numpy.sum(probability)), 1.0, places=6)
+        self.assertGreater(probability[0], probability[1])
 
     def test_clean_transcript(self):
         gui = _make_safe_app()
@@ -94,23 +94,23 @@ class TestThesisUnitChecks(unittest.TestCase):
         gui.close()
 
     def test_remove_fan_noise_reduces_low_freq(self):
-        sr = 16000
-        t = np.linspace(0, 1, sr, endpoint=False)
-        noise = 0.8 * np.sin(2*np.pi*50*t)
-        voice = 0.2 * np.sin(2*np.pi*500*t)
+        sample_rate_hz = 16000
+        time_s = numpy.linspace(0, 1, sample_rate_hz, endpoint=False)
+        noise = 0.8 * numpy.sin(2*numpy.pi*50*time_s)
+        voice = 0.2 * numpy.sin(2*numpy.pi*500*time_s)
         y = noise + voice
 
-        y_clean = appmodule.remove_fan_noise(y, sr)
+        y_clean = appmodule.remove_fan_noise(y, sample_rate_hz)
 
-        Y = np.abs(np.fft.rfft(y))
-        Yc = np.abs(np.fft.rfft(y_clean))
-        freqs = np.fft.rfftfreq(len(y), 1/sr)
+        Y = numpy.abs(numpy.fft.rfft(y))
+        Yc = numpy.abs(numpy.fft.rfft(y_clean))
+        freq_bins_hz = numpy.fft.rfftfreq(len(y), 1/sample_rate_hz)
 
         def band_mag(arr, f0, bw=3):
-            idx = int(np.argmin(np.abs(freqs - f0)))
+            idx = int(numpy.argmin(numpy.abs(freq_bins_hz - f0)))
             lo = max(0, idx-bw)
             hi = min(len(arr), idx+bw+1)
-            return float(np.mean(arr[lo:hi]))
+            return float(numpy.mean(arr[lo:hi]))
 
         self.assertLess(band_mag(Yc, 50), band_mag(Y, 50))
         self.assertGreater(band_mag(Yc, 500), 0.01)
